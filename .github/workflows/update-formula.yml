@@ -82,25 +82,18 @@ jobs:
           echo "Formula updated:"
           git diff
 
-      - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v5
-        with:
-          commit-message: "Update rumdl to v${{ env.VERSION }}"
-          title: "Update rumdl to v${{ env.VERSION }}"
-          body: |
-            Updates the rumdl formula to version ${{ env.VERSION }}.
-            
-            This PR was automatically created by the update workflow.
-            
-            ## Checklist
-            - [ ] SHA256 hashes are correct
-            - [ ] Version number is correct
-            - [ ] Formula passes `brew audit --strict`
-            
-            To test locally:
-            ```bash
-            brew tap rvben/rumdl
-            brew install --build-from-source rvben/rumdl/rumdl
-            ```
-          branch: update-rumdl-${{ env.VERSION }}
-          delete-branch: true
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          # Check if there are changes
+          if git diff --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          
+          # Commit and push
+          git add Formula/rumdl.rb
+          git commit -m "Update rumdl to v$VERSION"
+          git push origin main
