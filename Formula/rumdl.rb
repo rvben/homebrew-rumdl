@@ -2,16 +2,16 @@ class Rumdl < Formula
   desc "Fast Rust-based Markdown linter with real-time diagnostics and auto-fixes"
   homepage "https://github.com/rvben/rumdl"
   license "MIT"
-  version "0.0.97"
+  version "0.0.98"
 
   # Platform-specific downloads
   on_macos do
     if Hardware::CPU.intel?
       url "https://github.com/rvben/rumdl/releases/download/v#{version}/rumdl-v#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER_INTEL_MAC_SHA256"
+      sha256 "722dc703525aa3ab12c2696c6f63692843cc5acd36fb0df499c089ef62f11fec"
     elsif Hardware::CPU.arm?
       url "https://github.com/rvben/rumdl/releases/download/v#{version}/rumdl-v#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER_ARM_MAC_SHA256"
+      sha256 "dadf0def6f9a386270c3ce90ae917ef0d780671af7bddef3238fc81b88644cef"
     end
   end
 
