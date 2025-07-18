@@ -1,0 +1,102 @@
+name: Update Formula
+
+on:
+  repository_dispatch:
+    types: [rumdl_release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to update to (e.g., 0.0.97)'
+        required: true
+        type: string
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            VERSION="${{ github.event.client_payload.version }}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Updating to version $VERSION"
+
+      - name: Download and calculate SHA256
+        run: |
+          # Download archives and calculate SHA256
+          declare -A PLATFORMS=(
+            ["x86_64-apple-darwin"]="INTEL_MAC"
+            ["aarch64-apple-darwin"]="ARM_MAC"
+            ["x86_64-unknown-linux-gnu"]="LINUX_X86"
+            ["aarch64-unknown-linux-gnu"]="LINUX_ARM"
+          )
+          
+          for platform in "${!PLATFORMS[@]}"; do
+            url="https://github.com/rvben/rumdl/releases/download/v${VERSION}/rumdl-v${VERSION}-${platform}.tar.gz"
+            
+            # Try to download the file
+            if curl -L -f -o "rumdl-${platform}.tar.gz" "$url" 2>/dev/null; then
+              sha256=$(sha256sum "rumdl-${platform}.tar.gz" | cut -d' ' -f1)
+              echo "${PLATFORMS[$platform]}_SHA256=$sha256" >> $GITHUB_ENV
+              echo "✓ Downloaded and calculated SHA256 for $platform: $sha256"
+            else
+              echo "✗ Could not download $platform archive (might not be built for this platform)"
+              echo "${PLATFORMS[$platform]}_SHA256=PLACEHOLDER_${PLATFORMS[$platform]}_SHA256" >> $GITHUB_ENV
+            fi
+            
+            rm -f "rumdl-${platform}.tar.gz"
+          done
+
+      - name: Update formula
+        run: |
+          # Update version
+          sed -i "s/version \"[^\"]*\"/version \"$VERSION\"/" Formula/rumdl.rb
+          
+          # Update SHA256 hashes
+          if [ -n "$INTEL_MAC_SHA256" ] && [ "$INTEL_MAC_SHA256" != "PLACEHOLDER_INTEL_MAC_SHA256" ]; then
+            sed -i "s/sha256 \"PLACEHOLDER_INTEL_MAC_SHA256\"/sha256 \"$INTEL_MAC_SHA256\"/" Formula/rumdl.rb
+          fi
+          
+          if [ -n "$ARM_MAC_SHA256" ] && [ "$ARM_MAC_SHA256" != "PLACEHOLDER_ARM_MAC_SHA256" ]; then
+            sed -i "s/sha256 \"PLACEHOLDER_ARM_MAC_SHA256\"/sha256 \"$ARM_MAC_SHA256\"/" Formula/rumdl.rb
+          fi
+          
+          if [ -n "$LINUX_X86_SHA256" ] && [ "$LINUX_X86_SHA256" != "PLACEHOLDER_LINUX_X86_SHA256" ]; then
+            sed -i "s/sha256 \"PLACEHOLDER_LINUX_X86_SHA256\"/sha256 \"$LINUX_X86_SHA256\"/" Formula/rumdl.rb
+          fi
+          
+          if [ -n "$LINUX_ARM_SHA256" ] && [ "$LINUX_ARM_SHA256" != "PLACEHOLDER_LINUX_ARM_SHA256" ]; then
+            sed -i "s/sha256 \"PLACEHOLDER_LINUX_ARM_SHA256\"/sha256 \"$LINUX_ARM_SHA256\"/" Formula/rumdl.rb
+          fi
+          
+          # Show the changes
+          echo "Formula updated:"
+          git diff
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
+        with:
+          commit-message: "Update rumdl to v${{ env.VERSION }}"
+          title: "Update rumdl to v${{ env.VERSION }}"
+          body: |
+            Updates the rumdl formula to version ${{ env.VERSION }}.
+            
+            This PR was automatically created by the update workflow.
+            
+            ## Checklist
+            - [ ] SHA256 hashes are correct
+            - [ ] Version number is correct
+            - [ ] Formula passes `brew audit --strict`
+            
+            To test locally:
+            ```bash
+            brew tap rvben/rumdl
+            brew install --build-from-source rvben/rumdl/rumdl
+            ```
+          branch: update-rumdl-${{ env.VERSION }}
+          delete-branch: true
