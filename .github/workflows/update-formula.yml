@@ -81,6 +81,7 @@ jobs:
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v5
         with:
+          token: ${{ secrets.HOMEBREW_DISPATCH_TOKEN }}
           commit-message: "Update rumdl to v${{ env.VERSION }}"
           title: "Update rumdl to v${{ env.VERSION }}"
           body: |
