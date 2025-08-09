@@ -2,7 +2,7 @@ class Rumdl < Formula
   desc "Fast Rust-based Markdown linter with real-time diagnostics and auto-fixes"
   homepage "https://github.com/rvben/rumdl"
   license "MIT"
-  version "0.0.112"
+  version "0.0.113"
 
   # Platform-specific downloads
   on_macos do
