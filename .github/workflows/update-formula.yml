@@ -61,21 +61,27 @@ jobs:
           # Update version
           sed -i "s/version \"[^\"]*\"/version \"$VERSION\"/" Formula/rumdl.rb
           
-          # Update SHA256 hashes
+          # Update SHA256 hashes with more robust pattern matching
+          # This approach works for both placeholder strings and existing SHA256 values
+          
           if [ -n "$INTEL_MAC_SHA256" ] && [ "$INTEL_MAC_SHA256" != "PLACEHOLDER_INTEL_MAC_SHA256" ]; then
-            sed -i "s/sha256 \"PLACEHOLDER_INTEL_MAC_SHA256\"/sha256 \"$INTEL_MAC_SHA256\"/" Formula/rumdl.rb
+            # Update x86_64-apple-darwin SHA256 (Intel Mac)
+            sed -i '/x86_64-apple-darwin\.tar\.gz/,/sha256/ s/sha256 "[^"]*"/sha256 "'"$INTEL_MAC_SHA256"'"/' Formula/rumdl.rb
           fi
           
           if [ -n "$ARM_MAC_SHA256" ] && [ "$ARM_MAC_SHA256" != "PLACEHOLDER_ARM_MAC_SHA256" ]; then
-            sed -i "s/sha256 \"PLACEHOLDER_ARM_MAC_SHA256\"/sha256 \"$ARM_MAC_SHA256\"/" Formula/rumdl.rb
+            # Update aarch64-apple-darwin SHA256 (ARM Mac)
+            sed -i '/aarch64-apple-darwin\.tar\.gz/,/sha256/ s/sha256 "[^"]*"/sha256 "'"$ARM_MAC_SHA256"'"/' Formula/rumdl.rb
           fi
           
           if [ -n "$LINUX_X86_SHA256" ] && [ "$LINUX_X86_SHA256" != "PLACEHOLDER_LINUX_X86_SHA256" ]; then
-            sed -i "s/sha256 \"PLACEHOLDER_LINUX_X86_SHA256\"/sha256 \"$LINUX_X86_SHA256\"/" Formula/rumdl.rb
+            # Update x86_64-unknown-linux-musl SHA256 (Intel Linux)
+            sed -i '/x86_64-unknown-linux-musl\.tar\.gz/,/sha256/ s/sha256 "[^"]*"/sha256 "'"$LINUX_X86_SHA256"'"/' Formula/rumdl.rb
           fi
           
           if [ -n "$LINUX_ARM_SHA256" ] && [ "$LINUX_ARM_SHA256" != "PLACEHOLDER_LINUX_ARM_SHA256" ]; then
-            sed -i "s/sha256 \"PLACEHOLDER_LINUX_ARM_SHA256\"/sha256 \"$LINUX_ARM_SHA256\"/" Formula/rumdl.rb
+            # Update aarch64-unknown-linux-musl SHA256 (ARM Linux)
+            sed -i '/aarch64-unknown-linux-musl\.tar\.gz/,/sha256/ s/sha256 "[^"]*"/sha256 "'"$LINUX_ARM_SHA256"'"/' Formula/rumdl.rb
           fi
           
           # Show the changes
