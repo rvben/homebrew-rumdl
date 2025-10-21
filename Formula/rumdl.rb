@@ -1,8 +1,13 @@
 class Rumdl < Formula
-  desc "Fast Rust-based Markdown linter with real-time diagnostics and auto-fixes"
+  desc "Fast Markdown linter and formatter"
   homepage "https://github.com/rvben/rumdl"
   license "MIT"
   version "0.0.164"
+
+  livecheck do
+    url :stable
+    strategy :github_latest
+  end
 
   # Platform-specific downloads
   on_macos do
@@ -32,23 +37,30 @@ class Rumdl < Formula
   end
 
   test do
-    # Create a test markdown file
-    (testpath/"test.md").write <<~EOS
-      # Test Heading
+    # Test version output
+    assert_match "rumdl #{version}", shell_output("#{bin}/rumdl --version")
 
-      This is a test file for rumdl.
-      
+    # Test that rumdl successfully checks valid markdown (exit code 0)
+    (testpath/"valid.md").write <<~EOS
+      # Valid Heading
+
+      This is valid markdown with proper spacing.
+
       - List item 1
       - List item 2
     EOS
 
-    # Test that rumdl runs without error
-    system "#{bin}/rumdl", "--version"
-    
-    # Test linting functionality
-    output = shell_output("#{bin}/rumdl check #{testpath}/test.md 2>&1", 0)
-    
-    # Basic check that it processed the file
-    assert_match(/test\.md|No issues found|Found \d+ issue/, output)
+    output = shell_output("#{bin}/rumdl check #{testpath}/valid.md")
+    assert_match "No issues found", output
+
+    # Test that rumdl detects issues in invalid markdown (exit code 1)
+    (testpath/"invalid.md").write <<~EOS
+      # Bad Heading
+      Missing blank line below heading
+    EOS
+
+    output = shell_output("#{bin}/rumdl check #{testpath}/invalid.md 2>&1", 1)
+    assert_match "MD022", output
+    assert_match "Expected 1 blank line below heading", output
   end
 end
