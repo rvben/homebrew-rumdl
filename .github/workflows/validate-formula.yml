@@ -1,0 +1,80 @@
+name: Validate Formula
+
+on:
+  pull_request:
+    paths:
+      - 'Formula/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'Formula/**'
+  workflow_dispatch:
+
+jobs:
+  audit-and-test:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout tap
+        uses: actions/checkout@v4
+
+      - name: Setup Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Tap this repository
+        run: |
+          # Tap the repository from the local checkout
+          brew tap --force rvben/rumdl "$GITHUB_WORKSPACE"
+
+      - name: Run brew audit
+        run: |
+          brew audit --formula rvben/rumdl/rumdl
+
+      - name: Run brew style
+        run: |
+          brew style rvben/rumdl/rumdl
+
+      - name: Install formula
+        run: |
+          brew install --verbose rvben/rumdl/rumdl
+
+      - name: Run brew test
+        run: |
+          brew test rvben/rumdl/rumdl
+
+      - name: Verify installation
+        run: |
+          # Test that rumdl is actually installed and works
+          rumdl --version
+
+          # Create a test markdown file
+          cat > test.md << 'EOF'
+          # Test Heading
+
+          This is a test file.
+          EOF
+
+          # Test that it can lint
+          rumdl check test.md
+
+  strict-audit:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout tap
+        uses: actions/checkout@v4
+
+      - name: Setup Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Tap this repository
+        run: |
+          brew tap --force rvben/rumdl "$GITHUB_WORKSPACE"
+
+      - name: Run strict audit
+        run: |
+          brew audit --strict --online rvben/rumdl/rumdl
