@@ -2,7 +2,7 @@ class Rumdl < Formula
   desc "Fast Markdown linter and formatter"
   homepage "https://github.com/rvben/rumdl"
   license "MIT"
-  version "0.0.200"
+  version "0.0.201"
 
   livecheck do
     url :stable
@@ -13,10 +13,10 @@ class Rumdl < Formula
   on_macos do
     if Hardware::CPU.intel?
       url "https://github.com/rvben/rumdl/releases/download/v#{version}/rumdl-v#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "043916c64518db73c619eecf1d3e2c80761279120a804d0a90a19c20377b43c9"
+      sha256 "3474d621da964e1b3cb1f6c45e2dfb71827fe9b576348a315edd4c923d8f0d01"
     elsif Hardware::CPU.arm?
       url "https://github.com/rvben/rumdl/releases/download/v#{version}/rumdl-v#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "4dc303507aa6daeac5edc2eab918f8bf4dada3d1a4e7ece1ddd0a6d38b07b0a1"
+      sha256 "7fe05d6ac2972be3eafcd3431925b5feb05ea9bdbac6956668926714dbd05b60"
     end
   end
 
@@ -24,11 +24,11 @@ class Rumdl < Formula
     if Hardware::CPU.intel?
       # Use static musl binaries for better portability on Linux
       url "https://github.com/rvben/rumdl/releases/download/v#{version}/rumdl-v#{version}-x86_64-unknown-linux-musl.tar.gz"
-      sha256 "6b04f8c05358466d35498c833ff6ae212a15ebc5e1130de8c24425d7fbeb6570"
+      sha256 "8f3b9890834e0fe292632d082887ef5bed3b8315c81793c8b23e3e5c20f3bf3b"
     elsif Hardware::CPU.arm?
       # Use static musl binaries for better portability on Linux
       url "https://github.com/rvben/rumdl/releases/download/v#{version}/rumdl-v#{version}-aarch64-unknown-linux-musl.tar.gz"
-      sha256 "30c75b2678a41d70409a5cc46485dcc1aee7714257460214cf3b0f8702e28393"
+      sha256 "e11e46a507e257784d77b9ee689c34ca3de9a81a8ef43792b42ad0c8cfa3a294"
     end
   end
 
