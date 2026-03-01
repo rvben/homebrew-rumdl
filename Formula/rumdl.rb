@@ -13,10 +13,10 @@ class Rumdl < Formula
   on_macos do
     if Hardware::CPU.intel?
       url "https://github.com/rvben/rumdl/releases/download/v#{version}/rumdl-v#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "9b4bbf72b7c07365814db32480ab3c900f51a9003f5ba42d8304014b05248c41"
+      sha256 "6a203e70f0e0390c5390f440b1e916cfa0fa89161d79267b905831c0eaf1140f"
     elsif Hardware::CPU.arm?
       url "https://github.com/rvben/rumdl/releases/download/v#{version}/rumdl-v#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "0e6b48c93f0e9daf4bcef930416cdc5360162dde09f2430b96319a4a28fa7fe6"
+      sha256 "15ecf25bfcee897c9bcdea518152b3d16e668d7b99ce08fb283143563060a107"
     end
   end
 
@@ -24,11 +24,11 @@ class Rumdl < Formula
     if Hardware::CPU.intel?
       # Use static musl binaries for better portability on Linux
       url "https://github.com/rvben/rumdl/releases/download/v#{version}/rumdl-v#{version}-x86_64-unknown-linux-musl.tar.gz"
-      sha256 "2bd1c9e758543c83ed7e21661127cb5594f1bc9cd74a4376a0f45d8031cbc236"
+      sha256 "96b2d9c97dd69d85c6a533eb4de44142dcff606ee23b1064dcb592ba6dce481b"
     elsif Hardware::CPU.arm?
       # Use static musl binaries for better portability on Linux
       url "https://github.com/rvben/rumdl/releases/download/v#{version}/rumdl-v#{version}-aarch64-unknown-linux-musl.tar.gz"
-      sha256 "fdc46eeb62cebe949589ce01c36126146026041f8d7a4f445cce160e64f7f048"
+      sha256 "32d5e7bae4635c6bbcc3e49f37286d39c379a4944f200b119440ad23d609ae8c"
     end
   end
 
