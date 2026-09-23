@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Check the two invariants the formula's integrity rests on:
+# Check the invariants the formula's integrity rests on:
 #
-#   1. every sha256 is the hash of the artifact at the url directly above it
-#   2. every url names the same version
+#   1. every url points at rumdl's own releases
+#   2. the formula still ships every platform it is supposed to ship
+#   3. every sha256 is the hash of the artifact at the url directly above it
+#   4. every url names the same version
+#   5. every archive actually contains a rumdl binary to install
 #
-# Homebrew normally checks (1) only for the single platform it happens to be
-# running on, at install time, in a user's terminal, and checks (2) never. This
-# checks both for every platform the formula claims, from anywhere:
+# Homebrew normally checks (3) only for the single platform it happens to be
+# running on, at install time, in a user's terminal, and checks none of the
+# others ever. This checks all of them for every platform, from anywhere:
 #
 #   scripts/verify-formula.sh
 #
@@ -77,6 +80,53 @@ if [ "$url_count" != "$sha_count" ] || [ "$pair_count" != "$sha_count" ]; then
   exit 1
 fi
 
+# Every url must fetch from rumdl's own releases. Nothing else in the chain
+# checks this: a host serving bytes that match the pins satisfies every other
+# check in this script, and `brew audit --strict --online` does not require a
+# url's owner to match the homepage. Verified with a control - a formula whose
+# url pointed at another project's release asset, pinned to that asset's real
+# hash, passed every structural check and every hash comparison and reported
+# "All 1 pins match".
+ORIGIN_PREFIX="https://github.com/rvben/rumdl/releases/download/v"
+bad_origin=0
+while IFS="$(printf '\t')" read -r url _; do
+  case "$url" in
+    "$ORIGIN_PREFIX"*) ;;
+    *)
+      echo "error: url does not fetch from rumdl's own releases: $url" >&2
+      bad_origin=1
+      ;;
+  esac
+done <<EOF
+$pairs
+EOF
+if [ "$bad_origin" -ne 0 ]; then
+  echo "error: every url must begin ${ORIGIN_PREFIX}<version>/" >&2
+  exit 1
+fi
+
+# The platforms the formula is expected to ship, listed here deliberately rather
+# than derived from the formula. Deriving it from the file cannot detect the file
+# losing a platform: remove a url and its sha256 together and the url, sha and
+# pair counts all stay equal, so the run passes and cheerfully reports one
+# platform fewer. Verified with a control - deleting the x86_64-apple-darwin
+# block gave "All 3 pins match", exit 0, while macOS Intel users would have been
+# left with no bottle at all. Adding or renaming a platform is meant to require
+# an edit here; that is the check, not an inconvenience.
+EXPECTED_TARGETS="aarch64-apple-darwin
+aarch64-unknown-linux-musl
+x86_64-apple-darwin
+x86_64-unknown-linux-musl"
+
+got_targets="$(printf '%s\n' "$pairs" | cut -f1 |
+  sed -e 's|.*/rumdl-v[0-9][0-9.]*-||' -e 's|\.tar\.gz$||' | sort)"
+if [ "$got_targets" != "$(printf '%s\n' "$EXPECTED_TARGETS" | sort)" ]; then
+  echo "error: $FORMULA does not ship the expected set of platforms" >&2
+  echo "  missing:    $(comm -23 <(printf '%s\n' "$EXPECTED_TARGETS" | sort) <(printf '%s\n' "$got_targets") | tr '\n' ' ')" >&2
+  echo "  unexpected: $(comm -13 <(printf '%s\n' "$EXPECTED_TARGETS" | sort) <(printf '%s\n' "$got_targets") | tr '\n' ' ')" >&2
+  exit 1
+fi
+
 # The version is not declared in the formula (Homebrew scans it from the urls,
 # and declaring it too fails brew audit), so the urls have to agree among
 # themselves. A half-rewritten formula - some platforms moved to the new
@@ -133,7 +183,20 @@ while IFS="$(printf '\t')" read -r url want; do
 
   got="$(sha256_of "$tmp/asset.$n")"
   if [ "$got" = "$want" ]; then
-    echo "ok    $asset"
+    # A matching hash proves the bytes are the ones that were pinned, and
+    # nothing more. `def install` does `bin.install "rumdl"`, so an archive
+    # whose layout or binary name changed satisfies every check above and then
+    # fails at install time for every user on that platform. One `tar` listing
+    # per asset turns that into a pre-push failure.
+    if tar tzf "$tmp/asset.$n" 2>/dev/null | sed 's|/.*||' | sort -u | grep -qx rumdl; then
+      echo "ok    $asset"
+    else
+      echo "FAIL  $asset"
+      echo "      hash matches, but the archive has no top-level 'rumdl' entry"
+      echo "      contents:   $(tar tzf "$tmp/asset.$n" 2>/dev/null | head -5 | tr '\n' ' ')"
+      echo "      def install does bin.install \"rumdl\", so this cannot install"
+      failed=1
+    fi
   else
     echo "FAIL  $asset"
     echo "      pinned:     $want"
