@@ -77,7 +77,9 @@ command -v brew >/dev/null 2>&1 || {
 # 0.9.0, a Homebrew machine currently has 0.11.0, and the older one is the stricter
 # of the two - 0.9.0 rejected an `A && B || C` line that 0.11.0 accepted silently,
 # which is a lint that passes locally and fails in CI. So a clean run here is not a
-# promise of a clean `pins` job on an older shellcheck.
+# promise of a clean `pins` job on an older shellcheck. That job asserts the version
+# it finds (SHELLCHECK_EXPECTED in .github/workflows/validate-formula.yml), so a
+# runner-image bump fails there rather than leaving this note quietly false.
 echo "==> The scripts are free of shell defects"
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck --version | sed -n 2p
