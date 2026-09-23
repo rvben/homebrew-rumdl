@@ -2,7 +2,12 @@ class Rumdl < Formula
   desc "Fast Markdown linter and formatter"
   homepage "https://github.com/rvben/rumdl"
   license "MIT"
-  version "0.2.76"
+
+  # No `version` line on purpose: Homebrew scans the version out of the urls
+  # below, and declaring it as well fails `brew audit` ("redundant with version
+  # scanned from URL"). The urls therefore carry the version literally, and
+  # scripts/verify-formula.sh checks that every one of them agrees.
+  # scripts/update-formula.sh rewrites them together.
 
   livecheck do
     url :stable
@@ -12,10 +17,10 @@ class Rumdl < Formula
   # Platform-specific downloads
   on_macos do
     if Hardware::CPU.intel?
-      url "https://github.com/rvben/rumdl/releases/download/v#{version}/rumdl-v#{version}-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/rvben/rumdl/releases/download/v0.2.76/rumdl-v0.2.76-x86_64-apple-darwin.tar.gz"
       sha256 "415df77d4c5d11f336733c9570a72cd0a188d8e6a7460a76134c4c033ec5ece7"
     elsif Hardware::CPU.arm?
-      url "https://github.com/rvben/rumdl/releases/download/v#{version}/rumdl-v#{version}-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/rvben/rumdl/releases/download/v0.2.76/rumdl-v0.2.76-aarch64-apple-darwin.tar.gz"
       sha256 "10ec95ee46e1d3f67560250db97725681a5fa4bc488f383615cc54b06c4bdbc7"
     end
   end
@@ -23,12 +28,12 @@ class Rumdl < Formula
   on_linux do
     if Hardware::CPU.intel?
       # Use static musl binaries for better portability on Linux
-      url "https://github.com/rvben/rumdl/releases/download/v#{version}/rumdl-v#{version}-x86_64-unknown-linux-musl.tar.gz"
-      sha256 "90a8589a34cdc9aa50c9cf9a2b1e41837afe16bb11b2a7ace2e05dfb56a51176"
+      url "https://github.com/rvben/rumdl/releases/download/v0.2.76/rumdl-v0.2.76-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "0fe0c75a72849e877a779538d550cbefb2b4656911de188dac54067995a6ae2f"
     elsif Hardware::CPU.arm?
       # Use static musl binaries for better portability on Linux
-      url "https://github.com/rvben/rumdl/releases/download/v#{version}/rumdl-v#{version}-aarch64-unknown-linux-musl.tar.gz"
-      sha256 "a8a3a89bc0e1ebe92d1e5084a3785a1cce8189f02a1b3a08a69c55f53bbea967"
+      url "https://github.com/rvben/rumdl/releases/download/v0.2.76/rumdl-v0.2.76-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "ef4f1a707dad07f2fcfe207959ed03f2de6e0e0ff9e0c236dd64e89d88d75758"
     end
   end
 
