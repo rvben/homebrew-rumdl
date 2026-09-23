@@ -102,6 +102,26 @@ printf '#!/bin/sh\nexit 6\n' > "$WORK/stub/curl"
 chmod +x "$WORK/stub/curl"
 export PATH="$WORK/stub:$PATH"
 
+# Two kinds of inherited environment decide the outcome of a case, so both are
+# cleared once here rather than remembered per case.
+#
+# git's overrides name a repository rather than a directory. With GIT_DIR or
+# GIT_WORK_TREE exported - which is exactly how git invokes a hook, and a hook is
+# one of the places a contributor runs this suite from - the `git init` that builds
+# a scratch repository below instead rewrites the config of whatever repository
+# those point at, and the case reports a guard failure for it. Reproduced: with
+# GIT_DIR set to an unrelated repository, its .git/config was rewritten and the
+# setup then failed on `pathspec 'Formula' did not match any files`.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE \
+      GIT_CONFIG GIT_CONFIG_COUNT
+#
+# The scripts under test read their escape hatches from the environment, and each
+# one turns a refusal that a case asserts into a deliberate proceed. A case must
+# not depend on whether the caller happened to export one; the case that is about
+# a hatch exports it itself.
+unset ALLOW_UNATTESTED ALLOW_REPIN ALLOW_DOWNGRADE DISCARD_TAP_CLONE
+
 CASE_SETUP=""
 CASE_STUBS=""
 CASE_ASSERT=""
@@ -180,24 +200,33 @@ done
 # from call <switch_after> + 1 on. That is a release asset replaced in the window
 # between pinning and verifying.
 write_curl_stub() { # write_curl_stub <stubdir> <assetdir> [switch_after] [assetdir2]
-  cat > "$1/curl" <<STUB
+  # Every path the stub needs is written to a file beside it, never interpolated
+  # into its text. A quoted path inside a generated script is a syntax error the
+  # moment the path contains an apostrophe, which a TMPDIR can, and the case then
+  # fails for the harness rather than for what it tests.
+  printf '%s\n' "$2" > "$1/curl.assets"
+  printf '%s\n' "${4:-$2}" > "$1/curl.assets-after"
+  printf '%s\n' "${3:-0}" > "$1/curl.switch-after"
+  cat > "$1/curl" <<'STUB'
 #!/bin/sh
 out=""; url=""
-while [ \$# -gt 0 ]; do
-  case "\$1" in
-    -o) out="\$2"; shift 2 ;;
-    *)  url="\$1"; shift ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *)  url="$1"; shift ;;
   esac
 done
-[ -n "\$out" ] && [ -n "\$url" ] || { echo "stub curl: no -o or no url in: \$*" >&2; exit 2; }
-target="\$(printf '%s' "\$url" | sed -e 's|.*/rumdl-v[0-9][0-9.]*-||' -e 's|\\.tar\\.gz\$||')"
-count="\$(dirname "\$0")/curl.count"
-n=\$(( \$(cat "\$count" 2>/dev/null || echo 0) + 1 ))
-printf '%s' "\$n" > "\$count"
-dir='$2'
-if [ '${3:-0}' != '0' ] && [ "\$n" -gt '${3:-0}' ]; then dir='${4:-$2}'; fi
-[ -f "\$dir/\$target.tar.gz" ] || { echo "stub curl: no fixture asset for target '\$target'" >&2; exit 22; }
-cat "\$dir/\$target.tar.gz" > "\$out"
+[ -n "$out" ] && [ -n "$url" ] || { echo "stub curl: no -o or no url in: $*" >&2; exit 2; }
+target="$(printf '%s' "$url" | sed -e 's|.*/rumdl-v[0-9][0-9.]*-||' -e 's|\.tar\.gz$||')"
+here="$(dirname "$0")"
+count="$here/curl.count"
+n=$(( $(cat "$count" 2>/dev/null || echo 0) + 1 ))
+printf '%s' "$n" > "$count"
+switch="$(cat "$here/curl.switch-after")"
+dir="$(cat "$here/curl.assets")"
+if [ "$switch" != 0 ] && [ "$n" -gt "$switch" ]; then dir="$(cat "$here/curl.assets-after")"; fi
+[ -f "$dir/$target.tar.gz" ] || { echo "stub curl: no fixture asset for target '$target'" >&2; exit 22; }
+cat "$dir/$target.tar.gz" > "$out"
 STUB
   chmod +x "$1/curl"
 }
@@ -368,12 +397,15 @@ setup_clone_ahead() {
 }
 
 write_brew_stub() { # write_brew_stub <stubdir> <clonepath>
-  cat > "$1/brew" <<STUB
+  # The clone's path is handed over in a file beside the stub, for the reason
+  # write_curl_stub gives: interpolating it would break the stub on an apostrophe.
+  printf '%s\n' "$2" > "$1/brew.repository"
+  cat > "$1/brew" <<'STUB'
 #!/bin/sh
-case "\$1" in
+case "$1" in
   tap)          echo rvben/rumdl ;;
-  --repository) echo '$2' ;;
-  # Empty, so the \`brew trust\` call is skipped rather than stubbed into a
+  --repository) cat "$(dirname "$0")/brew.repository" ;;
+  # Empty, so the `brew trust` call is skipped rather than stubbed into a
   # success it never had.
   commands)     ;;
   # audit and style are not what these cases are about; they must not be the
@@ -391,15 +423,16 @@ STUB
 write_git_stub_no_rev_list() { # write_git_stub_no_rev_list <stubdir>
   local real
   real="$(command -v git)" || return 1
-  cat > "$1/git" <<STUB
+  printf '%s\n' "$real" > "$1/git.real"
+  cat > "$1/git" <<'STUB'
 #!/bin/sh
-for a in "\$@"; do
-  if [ "\$a" = rev-list ]; then
+for a in "$@"; do
+  if [ "$a" = rev-list ]; then
     echo "fatal: bad object FETCH_HEAD" >&2
     exit 128
   fi
 done
-exec '$real' "\$@"
+exec "$(cat "$(dirname "$0")/git.real")" "$@"
 STUB
   chmod +x "$1/git"
 }
