@@ -90,6 +90,14 @@ needs `ALLOW_DOWNGRADE=1` and re-downloads live assets, so it only works while
 that older release is still published. Editing the formula by hand is what
 `verify-formula.sh` exists to catch.
 
+A revert changes what an install gets; it does not touch a machine that already
+has the withdrawn version. Those pick the reverted pin up the next time they
+install from the tap:
+
+```bash
+brew update && brew reinstall rvben/rumdl/rumdl
+```
+
 Then expect the daily `freshness` job to fail every day until rumdl publishes a
 release the tap can move to. That job compares the pinned version against rumdl's
 latest release, and there is no way to tell it the tap is behind on purpose, so
