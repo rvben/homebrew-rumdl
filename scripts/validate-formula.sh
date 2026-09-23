@@ -162,6 +162,35 @@ elif [ "$FORMULA_STATE" = unknown ]; then
   echo
 fi
 
+# Everything below is built on the tap clone and this checkout being two directories:
+# the checkout holds the commit being validated, the clone is refreshed onto it, and one
+# is safe to rewrite because the other is not. Running this script from inside the tap
+# clone collapses that. The clone is a full clone of this repository, scripts included,
+# so `cd "$(brew --repository rvben/rumdl)" && ./scripts/validate-formula.sh` is a
+# reasonable thing for someone to try, and it has two bad outcomes and no good one. With
+# DISCARD_TAP_CLONE=1 the pin check reads the working tree, the reset then puts HEAD's
+# bytes back over it, and the run exits 0 reporting pins that belong to the formula it
+# just discarded - the byte check cannot see it, since it is comparing HEAD against
+# HEAD. Without the hatch it refuses over the contributor's own uncommitted work and
+# tells them to stash it into the directory they are already standing in.
+#
+# Asked before anything is tapped or refreshed, because after the refresh the damage is
+# done. `pwd -P` on both sides so a symlinked path is not mistaken for a different
+# directory, and `|| true` because an older brew may have nothing to say about a name it
+# has not tapped.
+tap_repo_probe="$(brew --repository rvben/rumdl 2>/dev/null || true)"
+if [ -n "$tap_repo_probe" ] && [ -d "$tap_repo_probe" ] &&
+   [ "$(cd "$tap_repo_probe" && pwd -P)" = "$(cd "$TAP_DIR" && pwd -P)" ]; then
+  echo "error: this directory IS the rvben/rumdl tap clone" >&2
+  echo "       $TAP_DIR" >&2
+  echo "       The brew checks below read a clone of the commit being validated, and" >&2
+  echo "       here that clone would be this working tree: refreshing it would rewrite" >&2
+  echo "       the formula the pin check just read, and with DISCARD_TAP_CLONE=1 it" >&2
+  echo "       would discard your uncommitted work and then report on the formula it" >&2
+  echo "       restored. Run it from your own checkout of the repository instead." >&2
+  exit 1
+fi
+
 # brew audit/style need the formula to be reachable as a tap. This changes local
 # Homebrew state, which is why it happens after the check that does not.
 if brew tap | grep -qx rvben/rumdl; then
@@ -299,12 +328,30 @@ if brew tap | grep -qx rvben/rumdl; then
   fi
   if { [ -n "$dirty" ] || [ -n "$hidden" ] || [ "$ahead" != "0" ]; } &&
      [ "${DISCARD_TAP_CLONE:-0}" = "1" ]; then
-    # "over", not "discarding": tracked edits and local commits do go, but untracked
-    # files stay where they are now that no `clean` follows the refresh. Saying
-    # discarded would overstate what happens to them in the direction that matters,
-    # since a contributor who reads it as "they are gone" has lost nothing.
+    # "over", not "discarding": a path HEAD does not track stays where it is now that no
+    # `clean` follows the refresh. Saying discarded would overstate what happens to those
+    # in the direction that matters, since a contributor who reads it as "they are gone"
+    # has lost nothing.
+    #
+    # The sentence below states the RULE the reset follows rather than a list of shapes,
+    # because the list was wrong twice. Measured, one arm each, on git 2.50.1:
+    #
+    #   edited + assume-unchanged   status clean, reset DESTROYS it (HEAD's bytes)
+    #   edited + skip-worktree      status clean, reset keeps the local bytes
+    #   staged deletion, bytes left status "D  f.rb" and "?? f.rb", reset DESTROYS them
+    #   untracked path              kept
+    #   ignored path                kept
+    #
+    # So the two flags do not behave alike, and "untracked files are left in place" was
+    # false for the one untracked path HEAD still tracks: git restores the staged
+    # deletion straight over it. Both of those paths ARE tracked edits in the hatch's
+    # sense - the contributor asked for tracked edits to go - and both are listed above
+    # before anything runs, the hidden ones under their own count. What was wrong was the
+    # promise, not the behaviour.
     echo "    DISCARD_TAP_CLONE=1: proceeding over $(printf '%s' "$dirty" | grep -c . ) changed path(s), $(printf '%s' "$hidden" | grep -c . ) path(s) git was told not to look at, and $ahead local commit(s)"
-    echo "    Tracked edits and local commits there go; untracked files are left in place."
+    echo "    Everything HEAD tracks there goes back to HEAD's bytes - including an edit"
+    echo "    git was told not to stat, and a path staged as deleted while HEAD still"
+    echo "    tracks it. A path HEAD does not track is not touched."
     # And this is what makes that sentence true. The refresh below is a NON-forced
     # checkout, which refuses to overwrite a modified tracked file - so without this
     # reset the hatch announced it was proceeding and then died on git's refusal, for
@@ -321,11 +368,10 @@ if brew tap | grep -qx rvben/rumdl; then
     # replaces them with the fetched commit's copy. The reset only touches paths in
     # HEAD, so ignored and untracked files are not its business.
     #
-    # What it still does not cover, because reset honours the flags: a path marked
-    # assume-unchanged or skip-worktree keeps its local bytes, and if the fetched
-    # commit changes that path the checkout below aborts. Nothing is lost there, and
-    # the hatch's counter above reports those paths separately rather than promising
-    # they go.
+    # What it still does not cover: skip-worktree. reset honours that flag, so such a
+    # path keeps its local bytes, and if the fetched commit changes it the checkout below
+    # aborts - nothing is lost, and the run stops. assume-unchanged is NOT in that
+    # sentence: the same reset overwrites it, measured above.
     if ! discard_out="$(tap_git reset --hard --quiet HEAD 2>&1)"; then
       echo "error: could not discard the local state of the rvben/rumdl tap clone" >&2
       echo "       $tap_repo" >&2
@@ -475,6 +521,26 @@ fi
 # The honest limit: this proves what brew READS, not that brew's own git ran nothing
 # of the clone's choosing. Those invocations are brew's, they are not wrapped, and
 # nothing here changes that.
+#
+# The states where this check refuses a run nothing did wrong are all attributes, and
+# they are in THIS repository's hands rather than the contributor's, because attributes
+# beat config. Two of them measured: `Formula/rumdl.rb eol=crlf` put 3 CRs in the
+# checked-out file with `-c core.autocrlf=false -c core.eol=lf` passed (and 3 with
+# `-c core.eol=crlf` as a control that the arm produces them at all), and `ident` with a
+# `$Id$` line in the formula had git expand it on checkout, leaving valid Ruby that no
+# commit contains. Either would make the blob and the file differ on every run, by
+# design and for everybody.
+#
+# There is no .gitattributes in this repository at all, and a Homebrew formula has no
+# business being CRLF or carrying an expanded ident, so committing one of those would be
+# the defect and this check firing on it would be correct. What it gets is therefore a
+# place in the diagnosis below rather than a guard of its own - without that, the refusal
+# sends someone hunting through their own clone's config for a cause that is committed.
+#
+# The same reasoning applies to a global git setting, which is what the fresh-tap path is
+# exposed to: brew's clone gets the contributor's core.autocrlf, nothing here can pass a
+# flag to it, and "re-tap to get a clean clone" would loop forever. So the diagnosis
+# names that too, and says which of the three causes re-tapping actually fixes.
 if [ "$FORMULA_STATE" = unknown ]; then
   echo "==> Not checking the tap clone's bytes: $TAP_DIR has no HEAD commit, so this"
   echo "    run has no committed formula to compare against."
@@ -499,11 +565,15 @@ elif ! git -C "$TAP_DIR" cat-file blob HEAD:Formula/rumdl.rb |
   echo "       The bytes there differ from the committed formula this run validated," >&2
   echo "       so brew audit, brew style and brew install below would report on a" >&2
   echo "       formula nothing has checked, under the name of the one that was." >&2
-  echo "       Something in that clone rewrites files as they are checked out, or it" >&2
-  echo "       is not at the commit it reports. Look for a filter driver or" >&2
-  echo "       line-ending conversion:" >&2
+  echo "       Something rewrites files as they are checked out, or that clone is not" >&2
+  echo "       at the commit it reports. Three places to look:" >&2
   echo "         git -C \"$tap_repo\" config --list | grep -E 'filter|autocrlf|eol|worktree'" >&2
-  echo "       Re-tapping gets a clean clone: brew untap rvben/rumdl, then re-run." >&2
+  echo "         git config --global --get-regexp 'core[.](autocrlf|eol)|^filter[.]'" >&2
+  echo "         git -C \"$TAP_DIR\" check-attr eol text filter ident -- Formula/rumdl.rb" >&2
+  echo "       Re-tapping gets a clean clone only if the cause was in that clone:" >&2
+  echo "       brew untap rvben/rumdl, then re-run. A global git setting or a" >&2
+  echo "       committed attribute reproduces itself in the new clone, so fix that" >&2
+  echo "       first - the second and third commands are the ones that find it." >&2
   exit 1
 fi
 

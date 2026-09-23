@@ -730,6 +730,15 @@ setup_tap_clone() { # setup_tap_clone <casedir>
 
 setup_clone_clean() { setup_tap_clone "$1"; }
 
+# The tap not present at all, which is a first run on any machine. The clone the other
+# cases hand to the stub is removed again, because here the stub's `brew tap --force`
+# makes it - that is what is under test. clone-head.txt is left recorded and unused: no
+# refusal is possible on this path, since there is no clone to refuse over.
+setup_clone_untapped() {
+  setup_tap_clone "$1" || return 1
+  rm -rf "$1/tap-clone" || return 1
+}
+
 setup_clone_dirty() {
   setup_tap_clone "$1" || return 1
   printf '# an uncommitted edit, as brew edit would leave\n' >> "$1/tap-clone/Formula/rumdl.rb" || return 1
@@ -967,6 +976,47 @@ case_env_discard_tap_clone() { # <casedir>
   printf 'DISCARD_TAP_CLONE=1\n'
 }
 
+# The two shapes the hatch's announcement names explicitly, so that each half of that
+# sentence is a tested claim rather than a measurement someone repeated from a comment.
+# Both reuse the hidden-path/hidden-bytes recording, and both mark a path the commit under
+# validation does not change - scripts/verify-formula.sh - so the refresh has no reason to
+# touch it and the reset is the only thing that can.
+#
+# An edit git was told not to stat, with the hatch asked for. Without the hatch this same
+# fixture must refuse, which is the case above; with it the edit is destroyed, and the
+# announcement now says so.
+setup_clone_assume_unchanged_for_discard() { setup_clone_assume_unchanged_edit "$1"; }
+
+# A path staged as deleted while HEAD still tracks it, private bytes left where it stood.
+# `git rm --cached` and then a write is how a local copy is kept out of the next commit,
+# and status reports the path twice: "D " for the staged deletion, "??" for the file now
+# standing there untracked. The hatch used to promise that untracked files were left in
+# place, which reads as a promise about exactly this file, and the reset restores the
+# staged deletion straight over it.
+setup_clone_staged_deletion_private_bytes() {
+  setup_tap_clone "$1" || return 1
+  scratch_git -C "$1/tap-clone" rm -q --cached scripts/verify-formula.sh || return 1
+  printf 'MY PRIVATE COPY\n' > "$1/tap-clone/scripts/verify-formula.sh" || return 1
+  printf '%s\n' scripts/verify-formula.sh > "$1/hidden-path" || return 1
+  cp "$1/tap-clone/scripts/verify-formula.sh" "$1/hidden-bytes" || return 1
+}
+
+# skip-worktree plus the hatch, the one shape the hatch cannot clear. reset honours the
+# flag, so the clone keeps the contributor's formula and the refresh has nothing to change
+# for that path - a run that would otherwise audit, install and test a formula nobody
+# validated while reporting on ours. Only the byte check stands there.
+setup_clone_skip_worktree_for_discard() { setup_clone_skip_worktree_formula "$1"; }
+
+# This checkout IS the tap clone, which is what `cd "$(brew --repository rvben/rumdl)"`
+# leaves someone in. The formula is edited and uncommitted, because that is the state the
+# collapse costs something in: the pin check reads the edit, the reset puts HEAD's bytes
+# back over it, and the run reports pins for a formula it discarded. The stub points brew
+# at the case directory itself; the tap-clone the fixture builds is never reached.
+setup_checkout_is_the_tap() {
+  setup_clone_uncommitted_formula "$1" || return 1
+  cp "$1/Formula/rumdl.rb" "$1/checkout-formula.rb" || return 1
+}
+
 # A clone carrying its own post-checkout hook. Not a collision case: the point is that
 # refreshing the clone must not EXECUTE anything the clone brought with it. `reset --hard`
 # ran no hooks, so switching the refresh to `checkout` started running them, and a hook
@@ -1119,6 +1169,56 @@ STUB
   chmod +x "$1/brew"
 }
 
+# The other half of validate-formula.sh's if/else: the tap is NOT present, so the run
+# takes `brew tap --force rvben/rumdl <path>` and everything after it depends on a clone
+# this script never made. Every case above stubs `brew tap` as always tapped, so that
+# branch had no coverage at all - and it is the branch the byte check after the if/else
+# exists for, because brew clones with ITS OWN git and nothing here can wrap that.
+#
+# So this stub does the clone, rather than reporting one. `<mutation>` is what brew's git
+# did on the way, which is the whole point of checking bytes instead of mechanisms:
+#
+#   ""       an ordinary clone. The formula must match the commit and the run completes.
+#   eol      a global core.autocrlf, which reaches brew's clone. Byte check must fire.
+#   absent   the formula not in the working tree, the shape sparse-checkout leaves.
+#
+# The real git path is recorded rather than called through PATH: the stub directory is
+# first in PATH for the run, and a case that also stubs git would otherwise recurse.
+write_brew_stub_untapped() { # write_brew_stub_untapped <stubdir> <clonepath> [mutation]
+  write_brew_stub "$1" "$2" || return 1
+  printf '%s\n' "${3:-}" > "$1/brew.mutate"
+  command -v git > "$1/git.real" || return 1
+  cat > "$1/brew" <<'STUB'
+#!/bin/sh
+d="$(dirname "$0")"
+dir="$(cat "$d/brew.repository")"
+case "$1" in
+  tap)
+    # `brew tap` alone lists the taps: nothing, so rvben/rumdl is untapped. With
+    # --force it is `brew tap --force rvben/rumdl <path>`, which clones <path>.
+    if [ "$2" = --force ]; then
+      rm -rf "$dir" || exit 1
+      "$(cat "$d/git.real")" -c init.templateDir= -c core.excludesFile=/dev/null \
+        -c core.hooksPath="$d/nohooks" clone -q "$4" "$dir" || exit 1
+      case "$(cat "$d/brew.mutate")" in
+        eol)
+          awk '{ printf "%s\r\n", $0 }' "$dir/Formula/rumdl.rb" > "$dir/f.crlf" || exit 1
+          mv "$dir/f.crlf" "$dir/Formula/rumdl.rb" || exit 1
+          ;;
+        absent) rm -f "$dir/Formula/rumdl.rb" || exit 1 ;;
+      esac
+    fi
+    ;;
+  --repository) printf '%s\n' "$dir" ;;
+  livecheck)    cat "$d/brew.livecheck" ;;
+  commands)     ;;
+  *)            ;;
+esac
+exit 0
+STUB
+  chmod +x "$1/brew"
+}
+
 # The shape brew returns for a livecheck block that resolves nothing: a status of
 # error, no version object at all, and exit 0. Taken from a real run against a
 # tapped formula whose strategy was pointed at a pattern that matches nothing.
@@ -1175,6 +1275,12 @@ write_validator_stubs() { # write_validator_stubs <stubdir>
 
 stubs_validator()             { write_validator_stubs "$1"; write_brew_stub "$1" "${1%/stub}/tap-clone"; }
 stubs_validator_no_rev_list() { stubs_validator "$1"; write_git_stub_no_rev_list "$1"; }
+stubs_validator_untapped()        { write_validator_stubs "$1"; write_brew_stub_untapped "$1" "${1%/stub}/tap-clone"; }
+stubs_validator_untapped_eol()    { write_validator_stubs "$1"; write_brew_stub_untapped "$1" "${1%/stub}/tap-clone" eol; }
+stubs_validator_untapped_absent() { write_validator_stubs "$1"; write_brew_stub_untapped "$1" "${1%/stub}/tap-clone" absent; }
+# brew answering with the case directory itself, for the one case where the checkout and
+# the tap clone are the same directory.
+stubs_validator_repo_is_checkout() { write_validator_stubs "$1"; write_brew_stub "$1" "${1%/stub}"; }
 stubs_validator_livecheck_unresolved() {
   write_validator_stubs "$1"
   write_brew_livecheck_unresolved "$1" "${1%/stub}/tap-clone"
@@ -1319,6 +1425,78 @@ assert_clone_refreshed_without_eol_conversion() { # <casedir>
     echo "($crs CR bytes), so brew is checking bytes no commit contains"
     return 1
   fi
+}
+
+# Every assertion on the fresh-tap path starts here: the run has to have TAKEN that
+# path. Both branches end in the same byte check with the same messages, so a case whose
+# brew stub failed to install - CASE_STUBS is called unchecked - would otherwise refresh
+# an existing clone and pass while covering nothing new.
+assert_took_the_fresh_tap_path() { # <casedir>
+  if grep -q 'Refreshing the existing' "$1/out.txt"; then
+    echo "the run refreshed an existing clone, so this case did not exercise the"
+    echo "brew tap --force path it exists for"
+    return 1
+  fi
+  if ! grep -q 'Tapping rvben/rumdl from' "$1/out.txt"; then
+    echo "the run never reached the tap step, so nothing below it was exercised:"
+    sed 's/^/  /' "$1/out.txt" | tail -8
+    return 1
+  fi
+}
+
+# The fresh path's positive control. brew's clone is the commit, so the byte check must
+# stay silent and the formula brew reads must be the one this run validated.
+assert_fresh_tap_clone_is_the_commit() { # <casedir>
+  local bad=0 want got
+  assert_took_the_fresh_tap_path "$1" || bad=1
+  if ! cmp -s "$1/Formula/rumdl.rb" "$1/tap-clone/Formula/rumdl.rb"; then
+    echo "the clone brew made does not hold the formula being validated:"
+    diff "$1/Formula/rumdl.rb" "$1/tap-clone/Formula/rumdl.rb" | sed 's/^/  /'
+    bad=1
+  fi
+  want="$(scratch_git -C "$1" rev-parse HEAD)"
+  got="$(scratch_git -C "$1/tap-clone" rev-parse HEAD)"
+  if [ "$want" != "$got" ]; then
+    echo "the clone brew made is not at the checkout's HEAD"
+    echo "  checkout: $want"
+    echo "  clone:    $got"
+    bad=1
+  fi
+  if grep -q 'Not checking the tap clone' "$1/out.txt"; then
+    echo "the byte check skipped itself on a run with a committed formula, so the"
+    echo "fresh-tap path is unguarded"
+    bad=1
+  fi
+  return "$bad"
+}
+
+# The fresh path's negative control: brew's own git rewrote the formula on its way into
+# the clone. Nothing in this script can wrap that git, so the refusal is the only thing
+# standing between it and a clean audit of bytes no commit contains - and the bytes must
+# still be there afterwards, since the script's business is refusing, not repairing.
+assert_fresh_tap_refused_with_bytes_intact() { # <casedir>
+  local bad=0 crs
+  assert_took_the_fresh_tap_path "$1" || bad=1
+  assert_refused_before_brew_checks "$1" || bad=1
+  crs="$(tr -dc '\r' < "$1/tap-clone/Formula/rumdl.rb" | wc -c | tr -d ' ')"
+  if [ "$crs" = 0 ]; then
+    echo "the CRs brew's git wrote are gone: either the fixture did not produce the"
+    echo "state it claims to, or the script rewrote a clone it does not own"
+    bad=1
+  fi
+  return "$bad"
+}
+
+assert_fresh_tap_refused_formula_absent() { # <casedir>
+  local bad=0
+  assert_took_the_fresh_tap_path "$1" || bad=1
+  assert_refused_before_brew_checks "$1" || bad=1
+  if [ -e "$1/tap-clone/Formula/rumdl.rb" ]; then
+    echo "$1/tap-clone/Formula/rumdl.rb exists, so the fixture did not produce the"
+    echo "state this case is about and the refusal came from something else"
+    bad=1
+  fi
+  return "$bad"
 }
 
 # A refusal is only a refusal if it stopped the thing it was protecting. The byte check
@@ -1487,6 +1665,65 @@ assert_clone_hidden_bytes_kept() { # <casedir>
   local bad=0
   assert_clone_hidden_bytes_only "$1" || bad=1
   assert_clone_head_unmoved "$1" || bad=1
+  return "$bad"
+}
+
+# The hatch's promise read the other way round. Every other hidden-state assertion here
+# checks that bytes SURVIVED; these two shapes are ones the reset destroys, the
+# announcement now says it destroys them, and a promise is only true if the deed matches.
+# Three outcomes are distinguished rather than two, because "the local bytes are gone" also
+# describes a run that deleted the file or wrote something else entirely over it.
+assert_hatch_restored_hidden_path() { # <casedir>
+  local bad=0 rel
+  if [ ! -f "$1/hidden-bytes" ] || [ ! -f "$1/hidden-path" ]; then
+    echo "harness: the fixture recorded no hidden edit to compare against"
+    return 1
+  fi
+  rel="$(cat "$1/hidden-path")"
+  if [ ! -f "$1/tap-clone/$rel" ]; then
+    echo "the clone's $rel is gone. The hatch said everything HEAD tracks goes back to"
+    echo "HEAD's bytes, and HEAD tracks that path, so removing it is not that"
+    bad=1
+  elif cmp -s "$1/hidden-bytes" "$1/tap-clone/$rel"; then
+    echo "the clone's $rel still holds the local bytes, so the run announced that"
+    echo "everything HEAD tracks goes back to HEAD's bytes and then left this path"
+    echo "alone - the promise is wrong again, in the other direction"
+    bad=1
+  elif ! clone_git "$1" cat-file blob "HEAD:$rel" | cmp -s - "$1/tap-clone/$rel"; then
+    echo "the clone's $rel is neither the local bytes nor HEAD's:"
+    clone_git "$1" cat-file blob "HEAD:$rel" | diff - "$1/tap-clone/$rel" | sed 's/^/  /'
+    bad=1
+  fi
+  assert_clone_refreshed "$1" || bad=1
+  return "$bad"
+}
+
+# skip-worktree under the hatch: the bytes stay, and what the case is for is that the run
+# stops before anything reads them. HEAD is deliberately not asserted - the fixture levels
+# the clone first, so the refresh moves it nowhere and an unmoved ref proves nothing here.
+assert_hatch_refused_over_kept_bytes() { # <casedir>
+  local bad=0
+  assert_clone_hidden_bytes_only "$1" || bad=1
+  assert_refused_before_brew_checks "$1" || bad=1
+  return "$bad"
+}
+
+# The checkout that is also the tap clone. The refusal has to arrive with the contributor's
+# uncommitted formula still where it was: this guard exists because the run would otherwise
+# reset that file and report pins for the bytes it replaced.
+assert_checkout_formula_untouched() { # <casedir>
+  local bad=0
+  if [ ! -f "$1/checkout-formula.rb" ]; then
+    echo "harness: no copy of the checkout's edited formula to compare against"
+    return 1
+  fi
+  if ! cmp -s "$1/checkout-formula.rb" "$1/Formula/rumdl.rb"; then
+    echo "the run rewrote the formula in the directory it was run from, which is the"
+    echo "uncommitted work this refusal exists to protect:"
+    diff "$1/checkout-formula.rb" "$1/Formula/rumdl.rb" | sed 's/^/  /'
+    bad=1
+  fi
+  assert_refused_before_brew_checks "$1" || bad=1
   return "$bad"
 }
 
@@ -2131,7 +2368,7 @@ CASE_STUBS=stubs_validator
 CASE_ENV=case_env_discard_tap_clone
 CASE_ASSERT=assert_clone_refreshed
 case_run "DISCARD_TAP_CLONE=1 discards the tracked edit it says it discards" 0 \
-  "Tracked edits and local commits there go" validate-formula.sh < "$FORMULA"
+  "Everything HEAD tracks there goes back to HEAD's bytes" validate-formula.sh < "$FORMULA"
 
 # And the bound on the hatch, which is the case that keeps `checkout -f` out of this
 # script. The hatch is asked for and there is also an ignored file the fetched commit
@@ -2144,6 +2381,56 @@ CASE_ENV=case_env_discard_tap_clone
 CASE_ASSERT=assert_clone_hidden_bytes_kept
 case_run "DISCARD_TAP_CLONE=1 does not extend to an ignored file the commit tracks" 1 \
   "git refused to refresh" validate-formula.sh < "$FORMULA"
+
+# The other two clauses of the hatch's announcement, one case each, because the sentence
+# was wrong twice and both corrections came from a measurement no case held. First: an edit
+# git was told not to stat. The announcement names it, and this is where that claim gets
+# checked - the reset overwrites such a path, and every list in front of the reset reports
+# the clone clean.
+CASE_SETUP=setup_clone_assume_unchanged_for_discard
+CASE_STUBS=stubs_validator
+CASE_ENV=case_env_discard_tap_clone
+CASE_ASSERT=assert_hatch_restored_hidden_path
+case_run "DISCARD_TAP_CLONE=1 overwrites the edit git was told not to stat" 0 \
+  "git was told not to stat" validate-formula.sh < "$FORMULA"
+
+# Second: a path staged as deleted whose bytes are still standing there. status calls that
+# path untracked as well as deleted, and the announcement used to promise untracked files
+# were left in place. They are, unless HEAD tracks the path - then the reset restores the
+# deletion over them. Same deed, same assertion, the other clause.
+CASE_SETUP=setup_clone_staged_deletion_private_bytes
+CASE_STUBS=stubs_validator
+CASE_ENV=case_env_discard_tap_clone
+CASE_ASSERT=assert_hatch_restored_hidden_path
+case_run "DISCARD_TAP_CLONE=1 overwrites a path staged as deleted that HEAD tracks" 0 \
+  "staged as deleted" validate-formula.sh < "$FORMULA"
+
+# And the bound the announcement claims in the opposite direction: skip-worktree, which
+# reset honours. The hatch clears nothing here, the clone keeps its own formula, and the
+# refresh has nothing to change for that path - so the run would carry on to audit, install
+# and test a formula nobody validated while reporting on ours. The byte check is the only
+# thing between the two, which is why this case asserts the refusal AND that the
+# contributor's bytes are still there to be refused over.
+CASE_SETUP=setup_clone_skip_worktree_for_discard
+CASE_STUBS=stubs_validator
+CASE_ENV=case_env_discard_tap_clone
+CASE_ASSERT=assert_hatch_refused_over_kept_bytes
+case_run "DISCARD_TAP_CLONE=1 cannot clear skip-worktree, and the run stops" 1 \
+  "is not the formula in" validate-formula.sh < "$FORMULA"
+
+# The script run from inside the tap clone, which is one directory doing both jobs. The tap
+# clone is a full clone of this repository, scripts included, so it is a reasonable thing to
+# try, and both outcomes are wrong: with the hatch the pin check reads the working tree, the
+# reset puts HEAD's bytes back over it, and the run exits 0 reporting pins for the formula it
+# discarded - the byte check compares HEAD against HEAD and cannot see it. The assertion is
+# the contributor's edit still being there, since the refusal message alone would also pass
+# on a run that refused after resetting.
+CASE_SETUP=setup_checkout_is_the_tap
+CASE_STUBS=stubs_validator_repo_is_checkout
+CASE_ENV=case_env_discard_tap_clone
+CASE_ASSERT=assert_checkout_formula_untouched
+case_run "the script refuses to run from inside the tap clone it refreshes" 1 \
+  "IS the rvben/rumdl tap clone" validate-formula.sh < "$FORMULA"
 
 # A hook the clone brought with it. The refresh is allowed to move this clone; it is not
 # allowed to run its code. `reset --hard` ran no hooks, so this case exists because the
@@ -2209,6 +2496,40 @@ CASE_STUBS=stubs_validator
 CASE_ASSERT=assert_clone_refreshed_keeping_deignored
 case_run "a local file the fetched commit stops ignoring is not deleted" 0 \
   "tap clone now at" validate-formula.sh < "$FORMULA"
+
+# The other branch of the if/else, which until now had no case at all: the tap is not
+# present, so the run tags along with `brew tap --force` and the clone it validates is
+# one brew made with brew's own git. Nothing in this script wraps that git, which is the
+# reason the byte check sits after the if/else rather than inside the refresh - a
+# placement nothing was testing. These three cases test the placement.
+#
+# First the positive control, so the two refusals below cannot be a fresh tap simply
+# failing.
+CASE_SETUP=setup_clone_untapped
+CASE_STUBS=stubs_validator_untapped
+CASE_ASSERT=assert_fresh_tap_clone_is_the_commit
+case_run "a fresh tap is validated as the commit brew cloned" 0 \
+  "Tapping rvben/rumdl from" validate-formula.sh < "$FORMULA"
+
+# A global core.autocrlf reaches brew's clone, and the wrapper's overrides do not: they
+# are arguments to commands this script runs, and this clone is not one of them. So the
+# formula brew audits holds CRs no commit contains, and only the bytes afterwards can
+# say so.
+CASE_SETUP=setup_clone_untapped
+CASE_STUBS=stubs_validator_untapped_eol
+CASE_ASSERT=assert_fresh_tap_refused_with_bytes_intact
+case_run "a fresh tap clone rewritten by brew's own git is refused" 1 \
+  "is not the formula in" validate-formula.sh < "$FORMULA"
+
+# And the arm of that check nothing reached before: the formula not in the clone's
+# working tree at all. `cmp` against a missing file would refuse with a message about
+# differing bytes and point at a filter driver, so the absent case is separate and says
+# what it is.
+CASE_SETUP=setup_clone_untapped
+CASE_STUBS=stubs_validator_untapped_absent
+CASE_ASSERT=assert_fresh_tap_refused_formula_absent
+case_run "a fresh tap clone with no formula in it is refused" 1 \
+  "tap clone has no Formula/rumdl.rb" validate-formula.sh < "$FORMULA"
 
 # The formula's livecheck block resolving nothing. This is the block that tells a
 # maintainer a new rumdl release exists, and a broken one is invisible: `brew audit`
