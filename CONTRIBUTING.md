@@ -131,6 +131,14 @@ pin wrong: v0.2.76 had two successful `Release` runs on one tag, publishing two
 different macOS binaries, and until the tap was re-pinned every `brew install`
 failed checksum verification.
 
+That schedule is also the one check that can retire itself. GitHub's docs state
+that in a public repository, scheduled workflows are disabled automatically once
+no repository activity has occurred in 60 days, and re-enabling one is manual.
+Releases commit here, so an active rumdl keeps it alive; a quiet stretch is
+exactly when it would stop, and a watchdog that stopped looks identical to a
+watchdog seeing nothing wrong. The tell is `freshness` missing from the run list
+rather than passing in it. Re-enable it under Actions if that happens.
+
 One caveat worth knowing, because it silently disabled this workflow for its
 first eleven months: a push made by a workflow using `GITHUB_TOKEN` does not
 trigger other workflows. `update-formula.yml` therefore dispatches Validate
