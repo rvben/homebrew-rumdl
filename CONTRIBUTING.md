@@ -82,6 +82,17 @@ alongside it: what remains untestable locally is whether rumdl's actually
 published assets match the committed pins, which is `verify-formula.sh`'s job and
 runs next in the same CI job.
 
+It also drives `validate-formula.sh` through the one pair of commands in this
+repository that destroys data: refreshing an existing `rvben/rumdl` tap clone
+with `reset --hard` and `clean -fd`. Those cases stub `brew`, build a real
+repository and a real clone of it for the stub to point at, and assert what is
+left in the clone rather than what the script printed, because a refusal that
+reset the clone anyway would pass a message check. Each fails against the
+previous version of the script, and one of them names the reason the coverage
+exists: against the earlier `rev-list --count FETCH_HEAD..HEAD || echo 0`, a
+`rev-list` that could not answer became "nothing to lose" and the clone's own
+commit was destroyed.
+
 ```bash
 ./scripts/test-guards.sh
 ```

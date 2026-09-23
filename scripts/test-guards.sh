@@ -102,6 +102,7 @@ printf '#!/bin/sh\nexit 6\n' > "$WORK/stub/curl"
 chmod +x "$WORK/stub/curl"
 export PATH="$WORK/stub:$PATH"
 
+CASE_SETUP=""
 CASE_STUBS=""
 CASE_ASSERT=""
 
@@ -307,6 +308,154 @@ PAIRS
 assert_pinned_to_other()   { assert_pins_match_fixtures "$1" "$WORK/assets" "$OTHER_VERSION"; }
 assert_repinned_to_cur()   { assert_pins_match_fixtures "$1" "$WORK/assets" "$CUR_VERSION"; }
 
+# ---------------------------------------------------------------------------
+# The tap-clone refresh in validate-formula.sh, which is the one place in this
+# repository that destroys data: `git reset --hard` followed by `git clean -qfd`
+# inside the clone `brew edit rvben/rumdl/rumdl` opens, where a contributor's
+# experiment plausibly lives. What permits that pair to run is a check three lines
+# above it, and that check was wrong until today - a failed `rev-list` was coerced
+# to `0`, turning "I could not tell" into "there is nothing to lose".
+#
+# So these cases use real git repositories rather than stubs for the part under
+# test: a committed checkout, a clone of it, and an assertion afterwards about what
+# the clone still holds. Only the surroundings are stubbed, because reaching the
+# refresh otherwise means Homebrew, the network, and this suite calling itself.
+# ---------------------------------------------------------------------------
+
+mkdir -p "$WORK/nohooks"
+# Pinned config rather than the machine's: a global commit.gpgsign, a templateDir
+# that copies hooks, or a missing user.name each turn a scratch commit into a
+# harness failure that reads as a guard failure.
+scratch_git() {
+  git -c init.templateDir= -c core.hooksPath="$WORK/nohooks" -c commit.gpgsign=false \
+      -c user.name=guard -c user.email=guard@example.invalid "$@"
+}
+
+setup_tap_clone() { # setup_tap_clone <casedir>
+  local d="$1"
+  # validate-formula.sh runs both of these before it reaches the refresh. The real
+  # verify-formula.sh needs the network, and the real test-guards.sh is this script.
+  printf '#!/bin/sh\nexit 0\n' > "$d/scripts/test-guards.sh"
+  printf '#!/bin/sh\nexit 0\n' > "$d/scripts/verify-formula.sh"
+  chmod +x "$d/scripts/test-guards.sh" "$d/scripts/verify-formula.sh"
+  scratch_git init -q "$d" || return 1
+  scratch_git -C "$d" add Formula scripts original.rb || return 1
+  scratch_git -C "$d" commit -q -m "the tap at its first commit" || return 1
+  scratch_git clone -q "$d" "$d/tap-clone" || return 1
+  # The checkout moves on by one commit, so the refresh has something to do and
+  # "the clone was left alone" and "the clone was refreshed" are different states.
+  printf 'a later change in the checkout\n' > "$d/later.txt" || return 1
+  scratch_git -C "$d" add later.txt || return 1
+  scratch_git -C "$d" commit -q -m "the tap moved on by one commit" || return 1
+}
+
+setup_clone_clean() { setup_tap_clone "$1"; }
+
+setup_clone_dirty() {
+  setup_tap_clone "$1" || return 1
+  printf '# an uncommitted edit, as brew edit would leave\n' >> "$1/tap-clone/Formula/rumdl.rb"
+}
+
+# One commit the checkout does not have, and nothing uncommitted. This is the shape
+# that the coerced rev-list destroyed: `dirty` empty and `ahead` read as 0 means
+# both refusal branches are skipped and reset --hard runs.
+setup_clone_ahead() {
+  setup_tap_clone "$1" || return 1
+  printf 'a local experiment\n' > "$1/tap-clone/experiment.txt" || return 1
+  scratch_git -C "$1/tap-clone" add experiment.txt || return 1
+  scratch_git -C "$1/tap-clone" commit -q -m "an experiment only the clone has" || return 1
+  scratch_git -C "$1/tap-clone" rev-parse HEAD > "$1/clone-head.txt"
+}
+
+write_brew_stub() { # write_brew_stub <stubdir> <clonepath>
+  cat > "$1/brew" <<STUB
+#!/bin/sh
+case "\$1" in
+  tap)          echo rvben/rumdl ;;
+  --repository) echo '$2' ;;
+  # Empty, so the \`brew trust\` call is skipped rather than stubbed into a
+  # success it never had.
+  commands)     ;;
+  # audit and style are not what these cases are about; they must not be the
+  # reason one fails.
+  *)            ;;
+esac
+exit 0
+STUB
+  chmod +x "$1/brew"
+}
+
+# A git that works, except that it cannot count commits - a corrupt clone, an
+# unreadable object, a FETCH_HEAD that never landed. The real path is baked in so
+# the stub cannot recurse into itself.
+write_git_stub_no_rev_list() { # write_git_stub_no_rev_list <stubdir>
+  local real
+  real="$(command -v git)" || return 1
+  cat > "$1/git" <<STUB
+#!/bin/sh
+for a in "\$@"; do
+  if [ "\$a" = rev-list ]; then
+    echo "fatal: bad object FETCH_HEAD" >&2
+    exit 128
+  fi
+done
+exec '$real' "\$@"
+STUB
+  chmod +x "$1/git"
+}
+
+# The two linters are stubbed to say nothing: validate-formula.sh runs both before
+# the refresh, and a real lint finding in an unrelated script would fail these
+# cases for a reason that has nothing to do with them. The comment deliberately
+# does not open with the name of the first one, which shellcheck would read as a
+# malformed directive and stop parsing the rest of this file at.
+write_validator_stubs() { # write_validator_stubs <stubdir>
+  local t
+  for t in shellcheck actionlint; do
+    printf '#!/bin/sh\nexit 0\n' > "$1/$t"
+    chmod +x "$1/$t"
+  done
+}
+
+stubs_validator()             { write_validator_stubs "$1"; write_brew_stub "$1" "${1%/stub}/tap-clone"; }
+stubs_validator_no_rev_list() { stubs_validator "$1"; write_git_stub_no_rev_list "$1"; }
+
+assert_clone_refreshed() { # <casedir>
+  local want got
+  want="$(scratch_git -C "$1" rev-parse HEAD)"
+  got="$(scratch_git -C "$1/tap-clone" rev-parse HEAD)"
+  if [ "$want" != "$got" ]; then
+    echo "the tap clone was not moved to the checkout's HEAD, so the brew checks"
+    echo "below it would read a different formula than the one being validated"
+    echo "  checkout: $want"
+    echo "  clone:    $got"
+    return 1
+  fi
+}
+
+assert_clone_kept_its_commit() { # <casedir>
+  local want got
+  want="$(cat "$1/clone-head.txt" 2>/dev/null)"
+  got="$(scratch_git -C "$1/tap-clone" rev-parse HEAD)"
+  if [ -z "$want" ]; then
+    echo "harness: no recorded clone HEAD to compare against"
+    return 1
+  fi
+  if [ "$want" != "$got" ]; then
+    echo "the clone's own commit was destroyed by reset --hard"
+    echo "  it was at: $want"
+    echo "  now at:    $got"
+    return 1
+  fi
+}
+
+assert_clone_still_dirty() { # <casedir>
+  if [ -z "$(scratch_git -C "$1/tap-clone" status --porcelain)" ]; then
+    echo "the clone's uncommitted changes were discarded"
+    return 1
+  fi
+}
+
 pass=0
 fail=0
 
@@ -320,11 +469,24 @@ case_run() {
   # Kept so a case can assert the formula came out exactly as it went in, which is
   # what every refusal in update-formula.sh actually promises.
   cp "$dir/Formula/rumdl.rb" "$dir/original.rb"
-  cp scripts/verify-formula.sh scripts/update-formula.sh "$dir/scripts/"
+  cp scripts/verify-formula.sh scripts/update-formula.sh scripts/validate-formula.sh "$dir/scripts/"
   chmod +x "$dir/scripts"/*.sh
 
+  # Whatever the case needs on disk before the script runs: a git repository and a
+  # clone of it, for the cases about the tap-clone refresh. A failure here is the
+  # harness's, not the guard's, so it stops the run rather than being counted.
+  if [ -n "${CASE_SETUP:-}" ]; then
+    if ! "$CASE_SETUP" "$dir" > "$dir/setup.log" 2>&1; then
+      echo "HARNESS FAILURE: the setup for '$name' failed, so the case would" >&2
+      echo "                 report the guard as broken. Fix the setup." >&2
+      sed 's/^/                 /' "$dir/setup.log" >&2
+      exit 1
+    fi
+  fi
+
   # A case may install stubs of its own - a curl that succeeds, a gh that does or
-  # does not attest - ahead of the deliberately failing defaults.
+  # does not attest, a git that cannot count commits - ahead of the deliberately
+  # failing defaults.
   if [ -n "${CASE_STUBS:-}" ]; then
     "$CASE_STUBS" "$dir/stub"
   fi
@@ -349,6 +511,7 @@ case_run() {
       why="$detail"
     fi
   fi
+  CASE_SETUP=""
   CASE_STUBS=""
   CASE_ASSERT=""
 
@@ -560,6 +723,49 @@ CASE_ASSERT=assert_formula_untouched
 case_run "a verification failure after the write restores the formula" 1 \
   "was restored to its previous contents" \
   update-formula.sh "$OTHER_VERSION" < "$FORMULA"
+
+# 18-21. validate-formula.sh's tap-clone refresh: the only data-destroying pair of
+#    commands in this repository, and the check that permits them. Each case gets a
+#    real checkout and a real clone of it, and each asserts what the clone still
+#    holds afterwards - the exit code says the guard fired, not that the work
+#    survived.
+
+# 18. The positive control, and the reason the refresh exists at all: `brew tap
+#     --force` on an already-tapped name does nothing, so without this the brew
+#     checks would read whatever commit the clone happened to be on.
+CASE_SETUP=setup_clone_clean
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_clone_refreshed
+case_run "a clean tap clone is moved to the checkout's HEAD" 0 \
+  "tap clone now at" validate-formula.sh < "$FORMULA"
+
+# 19. Uncommitted changes in the clone, which is exactly what `brew edit
+#     rvben/rumdl/rumdl` leaves behind.
+CASE_SETUP=setup_clone_dirty
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_clone_still_dirty
+case_run "a tap clone with uncommitted changes is not discarded" 1 \
+  "holds work this would destroy" validate-formula.sh < "$FORMULA"
+
+# 20. A commit the checkout does not have. Nothing shows as dirty, so only the
+#     ahead-count sees it.
+CASE_SETUP=setup_clone_ahead
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_clone_kept_its_commit
+case_run "a tap clone holding its own commit is not reset" 1 \
+  "commit(s) not in" validate-formula.sh < "$FORMULA"
+
+# 21. And the ahead-count failing to answer. This is the one that was wrong: a
+#     `rev-list` that could not run was coerced to 0, which with a clean worktree
+#     skipped both refusals and ran reset --hard on the very commits it could not
+#     count. The assertion is that the clone's own commit is still there, so this
+#     case fails against the previous version of the script rather than merely
+#     asserting the new message.
+CASE_SETUP=setup_clone_ahead
+CASE_STUBS=stubs_validator_no_rev_list
+CASE_ASSERT=assert_clone_kept_its_commit
+case_run "a tap clone whose commits cannot be counted is not reset" 1 \
+  "could not count commits" validate-formula.sh < "$FORMULA"
 
 echo
 if [ "$fail" -ne 0 ]; then
