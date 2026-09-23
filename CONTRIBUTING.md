@@ -2,76 +2,75 @@
 
 Thank you for considering contributing to the rumdl Homebrew tap!
 
-## Formula Quality Standards
+## The invariant that matters most
 
-This tap follows Homebrew's quality standards to ensure a great user experience.
+Every `sha256` in `Formula/rumdl.rb` must be the hash of the artifact fetched by
+the `url` directly above it, and every `url` must name the same version.
 
-### Validation Requirements
-
-All formula changes must pass these checks:
-
-1. **brew audit** - Formula validation
-2. **brew style** - Ruby style compliance
-3. **brew test** - Formula tests pass
-4. **brew audit --strict --online** - Comprehensive validation (CI only)
-
-### Testing Changes Locally
-
-Before submitting a PR, validate your changes locally:
+`brew audit` and `brew style` do not check either of those things. A formula can
+pass both while pinning the wrong artifact's hash, in which case `brew install`
+fails checksum verification for the affected platform and nothing upstream of
+the user notices. Check it with:
 
 ```bash
-# Quick validation
-./scripts/validate-formula.sh
+./scripts/verify-formula.sh
 ```
 
-The script will guide you through:
-- Formula audit
-- Style checks
-- Optional strict audit
-- Optional installation test
+That script needs nothing but `curl` and a shell, reads the working tree, and
+reports every platform rather than stopping at the first failure.
 
-### Manual Validation
+## Updating to a new rumdl release
 
-If you prefer to run commands manually:
+Do not edit the version or the hashes by hand. Run:
 
 ```bash
-# Tap from local directory
-brew tap --force rvben/rumdl /path/to/homebrew-rumdl
-
-# Run audit
-brew audit --formula rvben/rumdl/rumdl
-
-# Check style
-brew style rvben/rumdl/rumdl
-
-# Test installation
-brew install --verbose rvben/rumdl/rumdl
-
-# Run tests
-brew test rvben/rumdl/rumdl
-
-# Strict audit (optional, requires network)
-brew audit --strict --online rvben/rumdl/rumdl
+./scripts/update-formula.sh 0.2.76
 ```
 
-## Continuous Integration
+It rewrites the version inside each `url`, downloads exactly those urls, pins
+what it downloaded, and then re-runs `verify-formula.sh` against the result. It
+derives the platform list from the formula itself, so a pin cannot end up
+belonging to a different artifact than the url beside it. If any asset cannot be
+downloaded it aborts and leaves the formula untouched, rather than bumping the
+version while one platform keeps the previous release's hash.
 
-GitHub Actions automatically validates all PRs and commits:
+Normally you do not run it at all: rumdl's release workflow sends a
+`repository_dispatch` and `.github/workflows/update-formula.yml` does the above,
+commits, pushes, and then asks Validate Formula to run.
 
-- **Multi-platform testing**: macOS and Linux
-- **All brew checks**: audit, style, test
-- **Installation verification**: Ensures rumdl actually works
+## Validating locally
 
-See `.github/workflows/validate-formula.yml` for details.
+```bash
+./scripts/validate-formula.sh            # pins, audit, style, strict audit
+./scripts/validate-formula.sh --install  # also brew install and brew test
+```
 
-## Formula Updates
+This runs what CI runs, in the same order. Two things to know:
 
-When rumdl releases a new version:
+- `brew tap --force rvben/rumdl <path>` clones the repository, so the `brew`
+  checks see `HEAD`, not your uncommitted changes. Commit first if you want brew
+  to see your edit. The pin check at the start reads the working tree directly,
+  so it always reflects what you have now.
+- It taps `rvben/rumdl` from your local checkout, which changes your local
+  Homebrew state. `brew untap rvben/rumdl` afterwards if you would rather it did
+  not.
 
-1. **Automated**: The `update-formula.yml` workflow can be triggered
-2. **Manual**: Update version and SHA256 hashes in `Formula/rumdl.rb`
+## Continuous integration
 
-Always validate changes before pushing!
+`.github/workflows/validate-formula.yml` runs on pull requests, on pushes to
+`main` that touch `Formula/**` or `scripts/**`, and on explicit dispatch:
+
+- `pins`: every platform's pin, from one runner, without Homebrew.
+- `audit-and-test`: `brew audit`, `brew style`, `brew install`, `brew test` on
+  macOS and Linux. Each runner can only check the pin for the platform it runs
+  on, which is why the `pins` job exists.
+- `strict-audit`: `brew audit --strict --online`.
+
+One caveat worth knowing, because it silently disabled this workflow for its
+first eleven months: a push made by a workflow using `GITHUB_TOKEN` does not
+trigger other workflows. `update-formula.yml` therefore dispatches Validate
+Formula explicitly after it pushes. A push you make yourself triggers it
+normally.
 
 ## Questions?
 
