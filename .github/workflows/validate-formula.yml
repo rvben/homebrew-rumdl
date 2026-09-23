@@ -77,7 +77,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        # All four platforms the formula declares, because a job can only ever
+        # install and run the binary for the platform it is on. `macos-latest`
+        # is arm64 and `ubuntu-latest` is x86_64, so those two alone left
+        # x86_64-apple-darwin and aarch64 Linux never once executed - and an
+        # unrunnable binary is exactly what a wrong-branch pin produces. All
+        # four labels are free on public repositories, and ARM64 Linux is a
+        # Tier 1 Homebrew platform.
+        os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
 
     steps:
