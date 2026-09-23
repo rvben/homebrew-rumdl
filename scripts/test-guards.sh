@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# Tests for the guard scripts themselves.
+#
+#   scripts/test-guards.sh
+#
+# Every check in verify-formula.sh exists because a specific broken formula once
+# passed it. Those proofs were one-off experiments, which means the checks could
+# be weakened or reordered later and nothing would notice: a script that exits 1
+# on everything, or 0 on everything, passes an eye test just as well as a correct
+# one. Each case below breaks the formula in exactly one way and requires the
+# guard to reject it *with the message belonging to the check under test*, so a
+# mutation caught by the wrong check is a failure rather than a pass.
+#
+# Two-sided, deliberately. Case 1 requires the unmodified formula to clear every
+# structural check and reach the download stage, so "reject everything" cannot
+# pass this suite.
+#
+# Hermetic and offline: each case runs the real script against a scratch copy of
+# the repository, and `curl` is stubbed to fail immediately, so nothing here
+# touches the network, Homebrew, or the working tree. That bounds what this suite
+# can prove to the structural invariants - the download half (does each pin match
+# its artifact, does each archive hold an installable binary of the right
+# architecture) is checked against the real published assets by every run of
+# verify-formula.sh itself, which is what the `pins` CI job does.
+
+set -uo pipefail
+
+# No `set -e` here: every case below runs a script that is expected to fail, and
+# reads its exit code. So `cd` carries its own guard.
+cd "$(dirname "$0")/.." || exit 1
+FORMULA="Formula/rumdl.rb"
+[ -f "$FORMULA" ] || { echo "error: $FORMULA not found" >&2; exit 1; }
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+# A curl that cannot succeed, so the structural checks are all that runs. Exit 6
+# is curl's own "could not resolve host", which is what an offline run would give
+# anyway.
+mkdir -p "$WORK/stub"
+printf '#!/bin/sh\nexit 6\n' > "$WORK/stub/curl"
+chmod +x "$WORK/stub/curl"
+export PATH="$WORK/stub:$PATH"
+
+pass=0
+fail=0
+
+# case <name> <expect_exit|any> <expect_substring> <script> [args...] -- reads the
+# mutated formula on stdin.
+case_run() {
+  local name="$1" want_code="$2" want_text="$3" script="$4"; shift 4
+  local dir="$WORK/case-$((pass + fail + 1))"
+  mkdir -p "$dir/Formula" "$dir/scripts"
+  cat > "$dir/Formula/rumdl.rb"
+  cp scripts/verify-formula.sh scripts/update-formula.sh "$dir/scripts/"
+  chmod +x "$dir/scripts"/*.sh
+
+  local out code
+  out="$(cd "$dir" && "./scripts/$script" "$@" 2>&1)"
+  code=$?
+
+  local why=""
+  if [ "$want_code" != "any" ] && [ "$code" != "$want_code" ]; then
+    why="expected exit $want_code, got $code"
+  elif ! printf '%s' "$out" | grep -qF -- "$want_text"; then
+    why="expected message not found: $want_text"
+  fi
+
+  if [ -z "$why" ]; then
+    pass=$((pass + 1))
+    printf 'ok    %s\n' "$name"
+  else
+    fail=$((fail + 1))
+    printf 'FAIL  %s\n' "$name"
+    printf '      %s\n' "$why"
+    printf '%s\n' "$out" | sed 's/^/      | /' | head -12
+  fi
+}
+
+echo "Guard tests (offline; curl stubbed to fail)"
+echo
+
+# 1. The positive control. The unmodified formula must clear every structural
+#    check and reach the download stage, which this line marks. Without this a
+#    guard that rejected everything would pass every other case here.
+case_run "unmodified formula clears every structural check" any \
+  "Verifying Formula/rumdl.rb at version" verify-formula.sh < "$FORMULA"
+
+# 2. Arguments are rejected rather than ignored, so `verify-formula.sh 0.2.77`
+#    cannot report the committed version's pins as if they were 0.2.77's.
+case_run "an argument is refused, not discarded" 2 \
+  "takes no arguments" verify-formula.sh 0.2.77 < "$FORMULA"
+
+# 3. The four correct assets arranged in the wrong Hardware::CPU branches. Every
+#    other check in the script is satisfied by this formula, which hands Intel
+#    Macs an arm64-only binary.
+python3 - "$FORMULA" <<'PY' > "$WORK/macswap.rb"
+import re, sys
+t = open(sys.argv[1]).read()
+pairs = re.findall(r'( *url "[^"]*apple-darwin\.tar\.gz"\n *sha256 "[^"]*"\n)', t)
+assert len(pairs) == 2, f"expected 2 macOS url/sha256 pairs, found {len(pairs)}"
+a, b = pairs
+out = t.replace(a, "@@A@@").replace(b, "@@B@@").replace("@@A@@", b).replace("@@B@@", a)
+assert out != t and out.count("apple-darwin") == t.count("apple-darwin")
+sys.stdout.write(out)
+PY
+case_run "macOS pairs swapped between the intel and arm branches" 1 \
+  "the macos:intel branch must carry x86_64-apple-darwin" \
+  verify-formula.sh < "$WORK/macswap.rb"
+
+# 4. A platform dropped entirely. The url, sha256 and pair counts all stay in
+#    agreement, so only the expected-platform list catches it.
+sed '/x86_64-apple-darwin/,+1d' "$FORMULA" > "$WORK/dropped.rb"
+case_run "a platform removed with its pin" 1 \
+  "does not ship the expected set of platforms" \
+  verify-formula.sh < "$WORK/dropped.rb"
+
+# 5. A url pointing somewhere other than rumdl's releases. A host serving bytes
+#    that match the pin satisfies every hash check there is.
+sed 's|github.com/rvben/rumdl/releases|github.com/someone/else/releases|' "$FORMULA" > "$WORK/origin.rb"
+case_run "a url that does not fetch from rumdl's releases" 1 \
+  "does not fetch from rumdl's own releases" \
+  verify-formula.sh < "$WORK/origin.rb"
+
+# 6. A half-rewritten formula: one platform moved to a new release, the rest left
+#    behind. The version is scanned from the urls, so they have to agree.
+sed 's|v0\.2\.76/rumdl-v0\.2\.76-aarch64-unknown-linux-musl|v0.2.77/rumdl-v0.2.77-aarch64-unknown-linux-musl|' \
+  "$FORMULA" > "$WORK/mixed.rb"
+case_run "urls naming two different versions" 1 \
+  "name more than one version" \
+  verify-formula.sh < "$WORK/mixed.rb"
+
+# 7. A url that sits in no CPU branch at all, so nothing decides which machine
+#    gets it.
+sed '/Hardware::CPU.intel?/d' "$FORMULA" > "$WORK/unbound.rb"
+case_run "a url outside any Hardware::CPU branch" 1 \
+  "sits in no recognised platform branch" \
+  verify-formula.sh < "$WORK/unbound.rb"
+
+# 8. A sha256 with no url above it. The url/sha/pair counts can still agree on
+#    this, which is how it once reached the download loop and was reported as a
+#    malformed pin instead of a malformed formula.
+python3 - "$FORMULA" <<'PY' > "$WORK/unpaired.rb"
+import re, sys
+t = open(sys.argv[1]).read()
+m = re.search(r'( *)sha256 "([^"]*)"\n', t)
+assert m, "no sha256 line found"
+# A second sha256 directly below the first, and one url removed so the counts
+# still balance.
+t = t[:m.end()] + f'{m.group(1)}sha256 "{m.group(2)}"\n' + t[m.end():]
+t = re.sub(r' *url "[^"]*aarch64-unknown-linux-musl\.tar\.gz"\n', '', t, count=1)
+sys.stdout.write(t)
+PY
+case_run "a sha256 with no url above it" 1 \
+  "has no url above it" \
+  verify-formula.sh < "$WORK/unpaired.rb"
+
+# 9. A pin that is not a sha256 at all. Checked before the download, so a
+#    placeholder left in the formula fails by name rather than as a hash
+#    mismatch.
+sed 's|sha256 "415df77d4c5d11f336733c9570a72cd0a188d8e6a7460a76134c4c033ec5ece7"|sha256 "PLACEHOLDER"|' \
+  "$FORMULA" > "$WORK/placeholder.rb"
+case_run "a pin that is not 64 hex characters" 1 \
+  "pinned sha256 is not 64 hex characters" \
+  verify-formula.sh < "$WORK/placeholder.rb"
+
+# 10-12. The updater's version guard. It reaches curl, a url and the formula
+#    text, and the value arrives from a repository_dispatch payload. Run with
+#    ALLOW_UNATTESTED=1 so the checks under test are reached without a gh login.
+export ALLOW_UNATTESTED=1
+
+case_run "a version that is not a version" 2 \
+  "version must look like 1.2.3" update-formula.sh "1.2; rm -rf /" < "$FORMULA"
+
+# The one grep would accept: a bare semver on the first line, anything after it.
+case_run "a version whose first line only looks valid" 2 \
+  "version must look like 1.2.3" update-formula.sh "$(printf '1.2.3\nrm -rf /')" < "$FORMULA"
+
+case_run "moving the tap to an older version" 1 \
+  "Refusing to move the tap backwards" update-formula.sh 0.1.0 < "$FORMULA"
+
+echo
+if [ "$fail" -ne 0 ]; then
+  echo "FAILED: $fail of $((pass + fail)) guard tests"
+  exit 1
+fi
+echo "All $pass guard tests pass."

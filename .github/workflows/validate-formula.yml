@@ -40,6 +40,15 @@ jobs:
       - name: Checkout tap
         uses: actions/checkout@v4
 
+      # Before trusting the check below, check the checker. Offline and hermetic,
+      # so it costs seconds: it breaks the formula one way at a time and requires
+      # the guard to reject each one with the message belonging to the check under
+      # test. Every invariant here was added because a broken formula once passed
+      # it, and without this those proofs were one-off experiments that a later
+      # edit could quietly undo.
+      - name: The guards reject what they are supposed to reject
+        run: scripts/test-guards.sh
+
       - name: Every sha256 is the hash of the artifact its url fetches
         run: scripts/verify-formula.sh
 

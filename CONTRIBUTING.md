@@ -58,6 +58,24 @@ Normally you do not run it at all: rumdl's release workflow sends a
 `repository_dispatch` and `.github/workflows/update-formula.yml` does the above,
 commits, pushes, and then asks Validate Formula to run.
 
+## Changing a guard script
+
+`scripts/test-guards.sh` tests the guards themselves. It breaks the formula one
+way at a time - the right assets in the wrong `Hardware::CPU` branches, a
+platform dropped with its pin, a url pointing at someone else's release, a
+version that only looks valid on its first line - and requires the guard to
+reject each one with the message belonging to the check under test, so a mutation
+caught by the wrong check counts as a failure. It is offline, hermetic and takes
+seconds.
+
+```bash
+./scripts/test-guards.sh
+```
+
+If you add a check, add the case that fails without it, and confirm the case
+actually fails against the previous version of the script. A guard test that
+passes both before and after proves nothing.
+
 ## Validating locally
 
 ```bash
@@ -88,7 +106,8 @@ This runs what CI runs, in the same order. Two things to know:
 `main` that touch `Formula/**` or `scripts/**`, daily on a schedule, and on
 explicit dispatch. Its jobs:
 
-- `pins`: every platform's pin, from one runner, without Homebrew.
+- `pins`: `scripts/test-guards.sh`, then every platform's pin from one runner,
+  without Homebrew.
 - `brew`: `scripts/validate-formula.sh --install` on macOS and Linux, which is
   `brew audit`, `brew style`, `brew audit --strict --online`, `brew install` and
   `brew test`. Each runner can only check the pin for the platform it runs on,
