@@ -640,9 +640,18 @@ mkdir -p "$WORK/nohooks"
 # core.excludesFile is pinned away for the same class of reason as the template:
 # whether a fixture file can be committed must not depend on what the machine's
 # global ignore file happens to name.
+# The harness's own git. It builds the fixtures and it inspects them afterwards, so it
+# must not run anything a fixture installed: a fixture that gives a clone a
+# core.fsmonitor program or a hook is testing what validate-formula.sh does with it, and
+# an assertion that trips it itself reports the harness's own side effect as the
+# guard's. Measured: without the fsmonitor line the assertion's `rev-parse` and `status`
+# ran the fixture's program, which rewrote the formula, and the case failed naming both
+# the program and the dirty tree - while the script under test had suppressed it
+# correctly. core.hooksPath is here for the same reason.
 scratch_git() {
   git -c init.templateDir= -c core.excludesFile=/dev/null \
-      -c core.hooksPath="$WORK/nohooks" -c commit.gpgsign=false \
+      -c core.hooksPath="$WORK/nohooks" -c core.fsmonitor=false \
+      -c commit.gpgsign=false \
       -c user.name=guard -c user.email=guard@example.invalid "$@"
 }
 
@@ -657,6 +666,13 @@ setup_tap_clone() { # setup_tap_clone <casedir>
   # -f on paths this function wrote itself, so no ignore rule from any source can
   # decide whether the fixture repository gets built.
   scratch_git -C "$d" add -f Formula scripts original.rb || return 1
+  # A .gitignore the fixture wrote before calling this goes into the FIRST commit, so
+  # the clone inherits it and a later commit in the checkout can remove it. That is the
+  # one ignore rule .git/info/exclude cannot express: an uncommitted personal exclude is
+  # not something a fetched commit can drop.
+  if [ -f "$d/.gitignore" ]; then
+    scratch_git -C "$d" add -f .gitignore || return 1
+  fi
   scratch_git -C "$d" commit -q -m "the tap at its first commit" || return 1
 
   # The clone is a clone of `published`, not of the checkout, because that is the
@@ -923,6 +939,47 @@ setup_clone_ignored_dir_collision() {
 # directory, for the reason write_brew_stub gives below - a path can contain an
 # apostrophe - and because git runs a post-checkout hook from the top of the working
 # tree, which makes `../hook-ran` the case directory.
+# A file the clone holds under its OWN committed ignore rule, where the commit being
+# validated drops that rule without tracking the path. Nothing in the inventory can see
+# it: it is ignored while the inventory looks, and the collision check has nothing to
+# refuse because the fetched commit does not track it. It becomes an ordinary untracked
+# file the moment the refresh lands, which is what a `clean` after the refresh then
+# deleted. So this case expects a successful refresh that leaves the file alone.
+setup_clone_deignored_local_file() {
+  # Written before setup_tap_clone, so it lands in the commit the clone inherits.
+  printf 'notes.md\n' > "$1/.gitignore" || return 1
+  setup_tap_clone "$1" || return 1
+  # The commit under validation stops ignoring notes.md, and does not add it.
+  : > "$1/.gitignore" || return 1
+  scratch_git -C "$1" add -f .gitignore || return 1
+  scratch_git -C "$1" commit -q -m "stop ignoring notes.md" || return 1
+  printf 'MY PRIVATE NOTES\n' > "$1/tap-clone/notes.md" || return 1
+  printf '%s\n' notes.md > "$1/hidden-path" || return 1
+  cp "$1/tap-clone/notes.md" "$1/hidden-bytes" || return 1
+}
+
+# A clone whose config names a core.fsmonitor program. core.hooksPath does not cover
+# that setting, so it is a second way for the clone to get code run by the commands
+# above the refresh - during the inventory itself, not after it. The program here does
+# what a broken or hostile one would: it rewrites the formula the brew checks are about
+# to read, then answers "/" (assume everything changed), which is a valid response, so
+# git carries on and the run looks normal.
+#
+# It lives under .git/ and is named to git relatively, so no case-directory path is
+# interpolated into a config value; git runs it from the top of the working tree, which
+# is what makes `.git/fsm` and the marker's `../fsm-ran` resolve.
+setup_clone_fsmonitor_program() {
+  setup_tap_clone "$1" || return 1
+  cat > "$1/tap-clone/.git/fsm" <<'PROG' || return 1
+#!/bin/sh
+printf 'ran with args: %s\n' "$*" >> ../fsm-ran
+printf 'class Rumdl\n  # the fsmonitor program replaced this\nend\n' > Formula/rumdl.rb
+printf '/\0'
+PROG
+  chmod +x "$1/tap-clone/.git/fsm" || return 1
+  scratch_git -C "$1/tap-clone" config core.fsmonitor .git/fsm || return 1
+}
+
 setup_clone_post_checkout_hook() {
   setup_tap_clone "$1" || return 1
   mkdir -p "$1/tap-clone/.git/hooks" || return 1
@@ -1095,13 +1152,54 @@ assert_clone_refreshed_and_quiet() { # <casedir>
 # (it replaces the formula, and it is checked against the checkout's copy and for a
 # clean tree); the marker covers the hook having run at all, including a hook whose
 # only effect was outside the clone or was cleaned away afterwards.
-assert_clone_refreshed_and_hooks_unrun() { # <casedir>
-  local bad=0
+# Both markers, because a clone has more than one way to get its own code run and each
+# is a separate setting: .git/hooks (or core.hooksPath) for post-checkout, core.fsmonitor
+# for the program git asks what changed. One function so that neither case can pass on
+# the other's suppression, and so a third way, when one turns up, has one place to land.
+assert_clone_refreshed_and_clone_code_unrun() { # <casedir>
+  local bad=0 marker what
   assert_clone_refreshed "$1" || bad=1
-  if [ -f "$1/hook-ran" ]; then
-    echo "the clone's own post-checkout hook executed during the refresh, so the"
-    echo "clone got to run code after the inventory decided what may be touched:"
-    sed 's/^/  /' "$1/hook-ran"
+  for marker in hook-ran fsm-ran; do
+    [ -f "$1/$marker" ] || continue
+    case "$marker" in
+      hook-ran) what="post-checkout hook" ;;
+      fsm-ran)  what="core.fsmonitor program" ;;
+    esac
+    echo "the clone's own $what executed during the refresh, so the clone got to run"
+    echo "code while this script was deciding what may be touched, and could change"
+    echo "the formula the brew checks read:"
+    sed 's/^/  /' "$1/$marker"
+    bad=1
+  done
+  return "$bad"
+}
+
+# The de-ignored file: refreshed, and the file still there. Both halves, and the residue
+# checked by equality rather than presence - "the clone is not clean" would also pass on
+# a refresh that left the whole previous commit behind, which is the opposite failure.
+assert_clone_refreshed_keeping_deignored() { # <casedir>
+  local bad=0 rel residue want got
+  want="$(scratch_git -C "$1" rev-parse HEAD)"
+  got="$(scratch_git -C "$1/tap-clone" rev-parse HEAD)"
+  if [ "$want" != "$got" ]; then
+    echo "the tap clone was not moved to the checkout's HEAD, so the brew checks"
+    echo "below it would read a different formula than the one being validated"
+    echo "  checkout: $want"
+    echo "  clone:    $got"
+    bad=1
+  fi
+  if ! cmp -s "$1/Formula/rumdl.rb" "$1/tap-clone/Formula/rumdl.rb"; then
+    echo "the tap clone's working-tree formula is not the checkout's:"
+    diff "$1/Formula/rumdl.rb" "$1/tap-clone/Formula/rumdl.rb" | sed 's/^/  /'
+    bad=1
+  fi
+  assert_clone_hidden_bytes_only "$1" || bad=1
+  rel="$(cat "$1/hidden-path" 2>/dev/null)"
+  residue="$(scratch_git -C "$1/tap-clone" status --porcelain)"
+  if [ "$residue" != "?? $rel" ]; then
+    echo "the refreshed clone should hold exactly one untracked path, $rel - the file"
+    echo "whose ignore rule the fetched commit dropped - but it holds:"
+    printf '%s\n' "$residue" | sed 's/^/  /'
     bad=1
   fi
   return "$bad"
@@ -1825,13 +1923,13 @@ case_run "a formula the clone was told to keep is not validated as ours" 1 \
 # `ls-files -v` lists only tracked ones - so the refusal can only come from the
 # refresh itself, and the asserted message is the refresh's rather than the
 # inventory's. That distinction is the point: "holds work this would destroy" is the
-# inventory speaking, "would destroy work in it" is git refusing the checkout, and a
+# inventory speaking, "git refused to refresh" is git refusing the checkout, and a
 # case that accepted either would not say which half answered.
 CASE_SETUP=setup_clone_ignored_tracked_upstream
 CASE_STUBS=stubs_validator
 CASE_ASSERT=assert_clone_hidden_bytes_kept
 case_run "an ignored file the fetched commit tracks is not overwritten" 1 \
-  "would destroy work in it" validate-formula.sh < "$FORMULA"
+  "git refused to refresh" validate-formula.sh < "$FORMULA"
 
 # The same collision reached through an ancestor: the fetched commit tracks a file
 # where this clone keeps a directory of ignored work. Writing the file means removing
@@ -1841,7 +1939,7 @@ CASE_SETUP=setup_clone_ignored_dir_collision
 CASE_STUBS=stubs_validator
 CASE_ASSERT=assert_clone_hidden_bytes_kept
 case_run "an ignored directory the fetched commit tracks as a file is not removed" 1 \
-  "would destroy work in it" validate-formula.sh < "$FORMULA"
+  "git refused to refresh" validate-formula.sh < "$FORMULA"
 
 # And the same collision reached through case folding, where the expectation is the
 # filesystem's to decide. On a folding filesystem an ignored Notes.md and a tracked
@@ -1853,7 +1951,7 @@ CASE_STUBS=stubs_validator
 if [ "$FS_FOLDS_CASE" = 1 ]; then
   CASE_ASSERT=assert_clone_hidden_bytes_kept
   case_run "an ignored file differing only in case is one file, and is not overwritten" \
-    1 "would destroy work in it" validate-formula.sh < "$FORMULA"
+    1 "git refused to refresh" validate-formula.sh < "$FORMULA"
 else
   # The bytes only: here the refresh is supposed to succeed, so HEAD is supposed to
   # move, and asserting it unmoved would fail on correct behaviour.
@@ -1869,8 +1967,27 @@ fi
 # brew checks.
 CASE_SETUP=setup_clone_post_checkout_hook
 CASE_STUBS=stubs_validator
-CASE_ASSERT=assert_clone_refreshed_and_hooks_unrun
+CASE_ASSERT=assert_clone_refreshed_and_clone_code_unrun
 case_run "the tap clone's own post-checkout hook is not run by the refresh" 0 \
+  "tap clone now at" validate-formula.sh < "$FORMULA"
+
+# The same principle at the other setting. core.fsmonitor is not a hook by name and
+# core.hooksPath does not reach it, so it was live after the hooks were suppressed: the
+# program ran during the status and ls-files that take the inventory, and rewrote the
+# formula. This case is about the commands ABOVE the refresh as much as the refresh.
+CASE_SETUP=setup_clone_fsmonitor_program
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_clone_refreshed_and_clone_code_unrun
+case_run "the tap clone's core.fsmonitor program is not run by the refresh" 0 \
+  "tap clone now at" validate-formula.sh < "$FORMULA"
+
+# A file the clone ignores until the fetched commit stops ignoring it. The refresh must
+# proceed - there is no collision, and nothing in the inventory is holding it back - and
+# must leave the file where it is, which is why no `clean` follows the refresh.
+CASE_SETUP=setup_clone_deignored_local_file
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_clone_refreshed_keeping_deignored
+case_run "a local file the fetched commit stops ignoring is not deleted" 0 \
   "tap clone now at" validate-formula.sh < "$FORMULA"
 
 # The formula's livecheck block resolving nothing. This is the block that tells a

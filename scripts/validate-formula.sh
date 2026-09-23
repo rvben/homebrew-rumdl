@@ -187,8 +187,25 @@ if brew tap | grep -qx rvben/rumdl; then
     echo "error: rvben/rumdl is tapped but $tap_repo is not a git clone" >&2
     exit 1
   fi
+  # Every git command below runs against that clone through this wrapper, so the
+  # clone's own configuration can neither decide what the inventory sees nor get code
+  # of its own run while this script is deciding what may be destroyed.
+  #
+  # core.fsmonitor names a program git runs to ask what changed, and core.hooksPath
+  # does not cover it. Measured both ways round. A program there ran four times across
+  # the status, ls-files and checkout below, and rewrote Formula/rumdl.rb, so the brew
+  # checks read the clone's bytes while this script announced the fetched commit. And a
+  # program that answers "nothing changed" - which is what an ordinary watchman setup
+  # answers, no adversary required - made `status --porcelain` report a clean tree while
+  # the formula held uncommitted edits: the inventory going blind in exactly the way
+  # assume-unchanged makes it blind below, with the same consequence.
+  #
+  # core.hooksPath is emptied for the reason the refresh further down gives. Neither
+  # value can name something that runs: /dev/null is not a directory, and `false` is
+  # git's own spelling for "no fsmonitor".
+  tap_git() { git -C "$tap_repo" -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
   echo "==> Refreshing the existing rvben/rumdl tap clone from $TAP_DIR"
-  git -C "$tap_repo" fetch --quiet "$TAP_DIR" HEAD
+  tap_git fetch --quiet "$TAP_DIR" HEAD
 
   # The refresh discards whatever is in that clone, and `brew edit
   # rvben/rumdl/rumdl` edits precisely this clone - it is where a contributor's
@@ -202,7 +219,7 @@ if brew tap | grep -qx rvben/rumdl; then
   # config, or from the environment. An --untracked-files on the command line beats
   # all three, so the inventory asks for the listing it needs instead of accepting
   # the one configuration chose.
-  dirty="$(git -C "$tap_repo" status --porcelain --untracked-files=normal)"
+  dirty="$(tap_git status --porcelain --untracked-files=normal)"
   # assume-unchanged and skip-worktree tell git not to stat a tracked file at all, so
   # an edit to it is reported by neither `status` nor `diff --quiet HEAD`. No flag
   # turns that off: whether those files hold edits is genuinely unknown here, and
@@ -222,7 +239,7 @@ if brew tap | grep -qx rvben/rumdl; then
   #     flag, so the local bytes stay - and are now part of the tree every check
   #     below runs against. If that path is the formula, brew audits and installs
   #     the contributor's local copy while reporting on the formula under validation.
-  if ! index_flags="$(git -C "$tap_repo" ls-files -v 2>&1)"; then
+  if ! index_flags="$(tap_git ls-files -v 2>&1)"; then
     echo "error: could not read the index of the rvben/rumdl tap clone" >&2
     echo "       $tap_repo" >&2
     printf '%s\n' "$index_flags" | sed 's/^/         /' >&2
@@ -245,7 +262,7 @@ if brew tap | grep -qx rvben/rumdl; then
   # A rev-list that failed - a corrupt clone, an unreadable object, a FETCH_HEAD
   # that never landed - is not the same fact, and coercing it to 0 turns "I could
   # not tell" into "there is nothing to lose" immediately before destroying it.
-  if ! ahead="$(git -C "$tap_repo" rev-list --count FETCH_HEAD..HEAD 2>&1)"; then
+  if ! ahead="$(tap_git rev-list --count FETCH_HEAD..HEAD 2>&1)"; then
     echo "error: could not count commits in the rvben/rumdl tap clone" >&2
     echo "       $tap_repo" >&2
     printf '%s\n' "$ahead" | sed 's/^/         /' >&2
@@ -256,7 +273,12 @@ if brew tap | grep -qx rvben/rumdl; then
   fi
   if { [ -n "$dirty" ] || [ -n "$hidden" ] || [ "$ahead" != "0" ]; } &&
      [ "${DISCARD_TAP_CLONE:-0}" = "1" ]; then
-    echo "    DISCARD_TAP_CLONE=1: discarding $(printf '%s' "$dirty" | grep -c . ) changed path(s), $(printf '%s' "$hidden" | grep -c . ) path(s) git was told not to look at, and $ahead local commit(s)"
+    # "over", not "discarding": tracked edits and local commits do go, but untracked
+    # files stay where they are now that no `clean` follows the refresh. Saying
+    # discarded would overstate what happens to them in the direction that matters,
+    # since a contributor who reads it as "they are gone" has lost nothing.
+    echo "    DISCARD_TAP_CLONE=1: proceeding over $(printf '%s' "$dirty" | grep -c . ) changed path(s), $(printf '%s' "$hidden" | grep -c . ) path(s) git was told not to look at, and $ahead local commit(s)"
+    echo "    Tracked edits and local commits there go; untracked files are left in place."
   elif [ -n "$dirty" ] || [ -n "$hidden" ] || [ "$ahead" != "0" ]; then
     echo "error: the rvben/rumdl tap clone holds work this would destroy" >&2
     echo "       $tap_repo" >&2
@@ -295,37 +317,71 @@ if brew tap | grep -qx rvben/rumdl; then
   # -B rather than --detach so the clone stays on its branch, which is the state brew
   # expects; a clone already detached is refreshed detached.
   #
-  # `core.hooksPath` emptied because checkout runs hooks and `reset --hard` does not,
-  # so the change above would otherwise have started executing the clone's own
-  # `post-checkout` and `reference-transaction` hooks. Measured: with hooks live, a
-  # post-checkout hook ran and edited a tracked file in the clone, which is the
-  # formula the brew checks below then read while this script announced the fetched
-  # commit; the `clean -qfd` after it also deleted a file that hook had created,
-  # after the inventory that was supposed to decide whether anything here may be
-  # deleted. /dev/null is not a directory, so git finds no hook and says nothing.
-  # The `fetch` above needs no such treatment: it writes only FETCH_HEAD, and a
-  # reference-transaction hook was measured not to fire for it.
-  tap_branch="$(git -C "$tap_repo" symbolic-ref --quiet --short HEAD || true)"
+  # Hooks are suppressed by `tap_git`, and this command is why: checkout runs the
+  # clone's `post-checkout` and `reference-transaction` hooks where `reset --hard` ran
+  # neither, so swapping the command handed the clone an execution point that lands
+  # after the inventory and before the brew checks. Measured with hooks live: a
+  # post-checkout hook ran and rewrote the tracked formula, which is then the formula
+  # the brew checks read while this script announced the fetched commit. The `fetch`
+  # above needs no such treatment on its own account - it writes only FETCH_HEAD, and a
+  # reference-transaction hook was measured not to fire for it - but it goes through the
+  # wrapper too, because the `core.fsmonitor` half applies to every command that reads
+  # the worktree, and one command left out of a wrapper is the hole it exists to close.
+  tap_branch="$(tap_git symbolic-ref --quiet --short HEAD || true)"
   refresh_code=0
   if [ -n "$tap_branch" ]; then
-    refresh_out="$(git -C "$tap_repo" -c core.hooksPath=/dev/null checkout --quiet \
+    refresh_out="$(tap_git checkout --quiet \
       --no-overwrite-ignore -B "$tap_branch" FETCH_HEAD 2>&1)" || refresh_code=$?
   else
-    refresh_out="$(git -C "$tap_repo" -c core.hooksPath=/dev/null checkout --quiet \
+    refresh_out="$(tap_git checkout --quiet \
       --no-overwrite-ignore --detach FETCH_HEAD 2>&1)" || refresh_code=$?
   fi
+  # git's own message is the only account of why it refused, so it is printed and
+  # nothing here restates it as a cause. The earlier version of this block asserted
+  # one: that the paths git named are ignored files the inventory could not see.
+  # That is the collision this refresh exists to catch, but it is not the only way
+  # out of checkout nonzero - a clone whose index is unmerged (a `brew update` that
+  # conflicted, which is an ordinary state for a tap someone has committed to) also
+  # lands here, and there the sentence about ignored paths is simply false. Measured:
+  # `DISCARD_TAP_CLONE=1` on a clone mid-conflict printed it.
+  #
+  # Nor does the hatch cover that case, and deliberately not by force: `checkout -f`
+  # clears the unmerged index, but it was measured to defeat `--no-overwrite-ignore`
+  # as well, overwriting the very ignored file this block refuses over. So the
+  # refusal stands for every cause and names what to do for the two known shapes,
+  # rather than clearing one state and leaving rebase, cherry-pick and revert to
+  # print a wrong explanation - hand-enumerating the states is the mistake this
+  # refresh already made once with collisions.
   if [ "$refresh_code" != "0" ]; then
-    echo "error: refreshing the rvben/rumdl tap clone would destroy work in it" >&2
+    echo "error: git refused to refresh the rvben/rumdl tap clone" >&2
     echo "       $tap_repo" >&2
     printf '%s\n' "$refresh_out" | sed 's/^/         /' >&2
-    echo "       git refused, so nothing was written and the clone is as it was." >&2
-    echo "       Those paths are ignored there, so the inventory above did not list" >&2
-    echo "       them and DISCARD_TAP_CLONE=1 does not cover them: move or remove" >&2
-    echo "       them deliberately, or drop the tap (brew untap rvben/rumdl)." >&2
+    echo "       Nothing was written: the clone is exactly as it was." >&2
+    echo "       If git named paths there, that clone holds them as ignored or" >&2
+    echo "       untracked files and the fetched commit tracks them. The inventory" >&2
+    echo "       above cannot see those and DISCARD_TAP_CLONE=1 does not cover them," >&2
+    echo "       so move or remove them deliberately." >&2
+    echo "       If it named the index instead, an operation is unfinished in that" >&2
+    echo "       clone - finish it, or abort it (git -C \"$tap_repo\" merge --abort)." >&2
+    echo "       Either way you can also drop the tap (brew untap rvben/rumdl)." >&2
     exit 1
   fi
-  git -C "$tap_repo" clean -qfd
-  echo "    tap clone now at $(git -C "$tap_repo" rev-parse --short HEAD)"
+  # No `clean` here, deliberately. It used to follow the refresh, and on a clone the
+  # inventory has just found clean there is nothing for it to delete except the one
+  # thing it must not: a file the clone holds that its OWN .gitignore covers, where the
+  # fetched commit drops that ignore rule without tracking the path. Then the file is
+  # ignored when the inventory looks and untracked when the clean runs, so no list above
+  # holds it, checkout has no collision to refuse - the fetched commit does not track it
+  # - and the clean deletes it. Measured, with the whole inventory empty: a local
+  # `notes.md` was gone at the end of the run, and kept by the identical run with the
+  # clean removed, which also reached the fetched commit with the right formula.
+  #
+  # What it cost to remove: under DISCARD_TAP_CLONE=1 the untracked files that hatch
+  # discards now stay in the working tree rather than being deleted. They are listed
+  # above before anything happens, the brew checks below read Formula/rumdl.rb and do
+  # not care what else sits beside it, and leaving a file behind is the failure to
+  # prefer over deleting one.
+  echo "    tap clone now at $(tap_git rev-parse --short HEAD)"
 else
   echo "==> Tapping rvben/rumdl from $TAP_DIR"
   brew tap --force rvben/rumdl "$TAP_DIR"
