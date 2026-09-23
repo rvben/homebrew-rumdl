@@ -92,19 +92,24 @@ repository that destroys data: refreshing an existing `rvben/rumdl` tap clone
 with `reset --hard` and `clean -fd`. Those cases stub `brew`, build a real
 repository and a real clone of it for the stub to point at, and assert what is
 left in the clone rather than what the script printed, because a refusal that
-reset the clone anyway would pass a message check. Each fails against the
-previous version of the script, and one of them names the reason the coverage
-exists: against the earlier `rev-list --count FETCH_HEAD..HEAD || echo 0`, a
-`rev-list` that could not answer became "nothing to lose" and the clone's own
-commit was destroyed.
+reset the clone anyway would pass a message check.
+
+One of the four names the reason the coverage exists, and is the only one that
+fails against the previous version of the script: against the earlier `rev-list
+--count FETCH_HEAD..HEAD || echo 0`, a `rev-list` that could not answer became
+"nothing to lose", and the clone's own commit was destroyed. The other three
+cover refusals older than that fix, so there is no previous version for them to
+fail against; what keeps them honest is removing the check each one owns, after
+which that case, and only that case, fails.
 
 ```bash
 ./scripts/test-guards.sh
 ```
 
 If you add a check, add the case that fails without it, and confirm the case
-actually fails against the previous version of the script. A guard test that
-passes both before and after proves nothing.
+actually fails against the version of the script that lacks the check - the
+previous commit when the check is new, the script with that check removed when
+it is not. A guard test that passes both with and without proves nothing.
 
 ## Validating locally
 
