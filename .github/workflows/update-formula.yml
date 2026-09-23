@@ -6,100 +6,79 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to update to (e.g., 0.0.97)'
+        description: 'Version to update to (e.g. 0.2.76)'
         required: true
         type: string
 
 permissions:
   contents: write
-  pull-requests: write
+  # Needed to dispatch Validate Formula below. A push made with GITHUB_TOKEN
+  # does not trigger workflows, so the validation has to be asked for.
+  actions: write
+
+# Two releases dispatched close together would otherwise race on main.
+concurrency:
+  group: update-formula
+  cancel-in-progress: false
 
 jobs:
   update-formula:
     runs-on: ubuntu-latest
     steps:
+      # `main` rather than the event's commit. A second release dispatched
+      # before the first one pushes waits in the concurrency queue above, and
+      # would otherwise start from the commit that was current when it was
+      # dispatched - its own push would then be rejected as non-fast-forward.
+      # Checking out the branch means a queued run starts from what the run
+      # ahead of it just pushed.
       - uses: actions/checkout@v4
+        with:
+          ref: main
 
-      - name: Set version
+      - name: Update formula and verify every pin
+        env:
+          # Via env, not ${{ }} inside the script: this value comes from a
+          # dispatch payload and must not be able to become shell.
+          VERSION_INPUT: ${{ github.event.client_payload.version || inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            VERSION="${{ github.event.client_payload.version }}"
-          else
-            VERSION="${{ inputs.version }}"
-          fi
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "Updating to version $VERSION"
+          set -euo pipefail
+          echo "Requested version: $VERSION_INPUT"
+          # The script validates the format, hashes the assets its own url lines
+          # name, and re-verifies every pin against the published artifacts.
+          # It aborts rather than leaving any platform on a stale pin.
+          scripts/update-formula.sh "$VERSION_INPUT"
 
-      - name: Download and calculate SHA256
+      - name: Commit and push
         run: |
-          # Download archives and calculate SHA256
-          declare -A PLATFORMS=(
-            ["x86_64-apple-darwin"]="INTEL_MAC"
-            ["aarch64-apple-darwin"]="ARM_MAC"
-            ["x86_64-unknown-linux-gnu"]="LINUX_X86"
-            ["aarch64-unknown-linux-gnu"]="LINUX_ARM"
-          )
-          
-          for platform in "${!PLATFORMS[@]}"; do
-            url="https://github.com/rvben/rumdl/releases/download/v${VERSION}/rumdl-v${VERSION}-${platform}.tar.gz"
-            
-            # Try to download the file
-            if curl -L -f -o "rumdl-${platform}.tar.gz" "$url" 2>/dev/null; then
-              sha256=$(sha256sum "rumdl-${platform}.tar.gz" | cut -d' ' -f1)
-              echo "${PLATFORMS[$platform]}_SHA256=$sha256" >> $GITHUB_ENV
-              echo "✓ Downloaded and calculated SHA256 for $platform: $sha256"
-            else
-              echo "✗ Could not download $platform archive (might not be built for this platform)"
-              echo "${PLATFORMS[$platform]}_SHA256=PLACEHOLDER_${PLATFORMS[$platform]}_SHA256" >> $GITHUB_ENV
-            fi
-            
-            rm -f "rumdl-${platform}.tar.gz"
-          done
-
-      - name: Update formula
-        run: |
-          # Update version
-          sed -i "s/version \"[^\"]*\"/version \"$VERSION\"/" Formula/rumdl.rb
-          
-          # Update SHA256 hashes with more robust pattern matching
-          # This approach works for both placeholder strings and existing SHA256 values
-          
-          if [ -n "$INTEL_MAC_SHA256" ] && [ "$INTEL_MAC_SHA256" != "PLACEHOLDER_INTEL_MAC_SHA256" ]; then
-            # Update x86_64-apple-darwin SHA256 (Intel Mac)
-            sed -i '/x86_64-apple-darwin\.tar\.gz/,/sha256/ s/sha256 "[^"]*"/sha256 "'"$INTEL_MAC_SHA256"'"/' Formula/rumdl.rb
-          fi
-          
-          if [ -n "$ARM_MAC_SHA256" ] && [ "$ARM_MAC_SHA256" != "PLACEHOLDER_ARM_MAC_SHA256" ]; then
-            # Update aarch64-apple-darwin SHA256 (ARM Mac)
-            sed -i '/aarch64-apple-darwin\.tar\.gz/,/sha256/ s/sha256 "[^"]*"/sha256 "'"$ARM_MAC_SHA256"'"/' Formula/rumdl.rb
-          fi
-          
-          if [ -n "$LINUX_X86_SHA256" ] && [ "$LINUX_X86_SHA256" != "PLACEHOLDER_LINUX_X86_SHA256" ]; then
-            # Update x86_64-unknown-linux-musl SHA256 (Intel Linux)
-            sed -i '/x86_64-unknown-linux-musl\.tar\.gz/,/sha256/ s/sha256 "[^"]*"/sha256 "'"$LINUX_X86_SHA256"'"/' Formula/rumdl.rb
-          fi
-          
-          if [ -n "$LINUX_ARM_SHA256" ] && [ "$LINUX_ARM_SHA256" != "PLACEHOLDER_LINUX_ARM_SHA256" ]; then
-            # Update aarch64-unknown-linux-musl SHA256 (ARM Linux)
-            sed -i '/aarch64-unknown-linux-musl\.tar\.gz/,/sha256/ s/sha256 "[^"]*"/sha256 "'"$LINUX_ARM_SHA256"'"/' Formula/rumdl.rb
-          fi
-          
-          # Show the changes
-          echo "Formula updated:"
-          git diff
-
-      - name: Commit and push changes
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          
-          # Check if there are changes
+          set -euo pipefail
           if git diff --quiet; then
-            echo "No changes to commit"
+            echo "Formula already up to date; nothing to commit."
             exit 0
           fi
-          
-          # Commit and push
+          # Read the version back out of the formula rather than trusting the
+          # input, so the commit message can only ever name the version that was
+          # actually written. It comes from the urls because the formula
+          # declares no version of its own; the step above already proved all of
+          # them agree.
+          version="$(sed -n 's|.*/releases/download/v\([0-9][0-9.]*\)/.*|\1|p' Formula/rumdl.rb | sort -u)"
+          if [ -z "$version" ] || [ "$(printf '%s\n' "$version" | wc -l)" != "1" ]; then
+            echo "error: could not read a single version from Formula/rumdl.rb" >&2
+            exit 1
+          fi
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
           git add Formula/rumdl.rb
-          git commit -m "Update rumdl to v$VERSION"
-          git push origin main
+          git commit -m "chore(formula): update rumdl to v${version}"
+          git push origin HEAD:main
+
+      - name: Ask for full Homebrew validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # brew audit/install/test on real macOS and Linux runners. This has to
+          # be an explicit dispatch: the push above was made with GITHUB_TOKEN,
+          # and GitHub does not start workflows from such pushes, which is why
+          # Validate Formula never ran once between 2025-10-21 and 2026-09-23.
+          gh workflow run validate-formula.yml --ref main
+          echo "Dispatched Validate Formula."
