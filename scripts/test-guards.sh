@@ -1151,8 +1151,15 @@ write_brew_stub() { # write_brew_stub <stubdir> <clonepath> [livecheck-json-file
 ]
 JSON
   fi
+  # Every invocation is logged, argv first. assert_refused_before_brew_checks reads this
+  # to establish that audit, style and install were never reached: the progress line it
+  # used to look for is printed by the script itself, so a regression that called brew
+  # before printing it, or dropped the line, satisfied the assertion while doing the exact
+  # thing the refusal exists to prevent. A missing log is a failure too - it is also what
+  # a case whose CASE_STUBS silently failed looks like.
   cat > "$1/brew" <<'STUB'
 #!/bin/sh
+printf '%s\n' "$*" >> "$(dirname "$0")/brew.calls"
 case "$1" in
   tap)          echo rvben/rumdl ;;
   --repository) cat "$(dirname "$0")/brew.repository" ;;
@@ -1182,15 +1189,38 @@ STUB
 #   eol      a global core.autocrlf, which reaches brew's clone. Byte check must fire.
 #   absent   the formula not in the working tree, the shape sparse-checkout leaves.
 #
+# The `eol` arm sets that config for real, through GIT_CONFIG_GLOBAL, rather than writing
+# CRLF into the clone afterwards with awk: the claim being tested is that a setting OUTSIDE
+# the clone reaches the git brew runs, and rewriting the file after the clone demonstrates
+# nothing about configuration. Measured on git 2.50.1 with an otherwise empty global
+# config: `core.autocrlf = true` gives the clone's working-tree formula 3 CR bytes while
+# HEAD's blob has none, which is exactly the divergence the byte check exists for.
+# `core.eol = crlf` does NOT do it on its own - with no .gitattributes marking the file
+# text, the clone comes out with 0 CRs - so autocrlf is the setting, not eol.
+#
+# GIT_CONFIG_SYSTEM is pinned to /dev/null and GIT_CONFIG_GLOBAL to a file this fixture
+# owns for every arm, not just that one: a contributor whose own global config sets
+# autocrlf would otherwise hand the ordinary-clone arm the mutated arm's state, and that
+# arm's whole job is to be the case where nothing diverges.
+#
+# The bytes the clone ends up with are saved beside the stub so an assertion can compare
+# what is there at the end against what brew's git actually produced. Counting CRs proves
+# they are CRLF bytes; only the saved copy proves the script left them alone.
+#
 # The real git path is recorded rather than called through PATH: the stub directory is
 # first in PATH for the run, and a case that also stubs git would otherwise recurse.
 write_brew_stub_untapped() { # write_brew_stub_untapped <stubdir> <clonepath> [mutation]
   write_brew_stub "$1" "$2" || return 1
   printf '%s\n' "${3:-}" > "$1/brew.mutate"
+  : > "$1/gitconfig.global" || return 1
+  if [ "${3:-}" = eol ]; then
+    printf '[core]\n\tautocrlf = true\n' > "$1/gitconfig.global" || return 1
+  fi
   command -v git > "$1/git.real" || return 1
   cat > "$1/brew" <<'STUB'
 #!/bin/sh
 d="$(dirname "$0")"
+printf '%s\n' "$*" >> "$d/brew.calls"
 dir="$(cat "$d/brew.repository")"
 case "$1" in
   tap)
@@ -1198,15 +1228,15 @@ case "$1" in
     # --force it is `brew tap --force rvben/rumdl <path>`, which clones <path>.
     if [ "$2" = --force ]; then
       rm -rf "$dir" || exit 1
+      GIT_CONFIG_GLOBAL="$d/gitconfig.global" GIT_CONFIG_SYSTEM=/dev/null \
       "$(cat "$d/git.real")" -c init.templateDir= -c core.excludesFile=/dev/null \
         -c core.hooksPath="$d/nohooks" clone -q "$4" "$dir" || exit 1
       case "$(cat "$d/brew.mutate")" in
-        eol)
-          awk '{ printf "%s\r\n", $0 }' "$dir/Formula/rumdl.rb" > "$dir/f.crlf" || exit 1
-          mv "$dir/f.crlf" "$dir/Formula/rumdl.rb" || exit 1
-          ;;
         absent) rm -f "$dir/Formula/rumdl.rb" || exit 1 ;;
       esac
+      if [ -f "$dir/Formula/rumdl.rb" ]; then
+        cp "$dir/Formula/rumdl.rb" "$d/tap-formula.after-clone" || exit 1
+      fi
     fi
     ;;
   --repository) printf '%s\n' "$dir" ;;
@@ -1475,13 +1505,31 @@ assert_fresh_tap_clone_is_the_commit() { # <casedir>
 # standing between it and a clean audit of bytes no commit contains - and the bytes must
 # still be there afterwards, since the script's business is refusing, not repairing.
 assert_fresh_tap_refused_with_bytes_intact() { # <casedir>
-  local bad=0 crs
+  local bad=0 crs saved
+  saved="$1/stub/tap-formula.after-clone"
   assert_took_the_fresh_tap_path "$1" || bad=1
   assert_refused_before_brew_checks "$1" || bad=1
+  # Two separate questions, and the CR count answers only the first. Did brew's git
+  # really produce CRLF bytes - the fixture's own claim, which a global core.autocrlf
+  # that failed to reach the clone would leave unmet while the case still passed on a
+  # refusal printed for some other reason? And are the bytes still what that clone
+  # ended up with - the script's claim, since its business is refusing, not repairing.
+  # Only the copy the stub saved at clone time can answer the second.
   crs="$(tr -dc '\r' < "$1/tap-clone/Formula/rumdl.rb" | wc -c | tr -d ' ')"
   if [ "$crs" = 0 ]; then
-    echo "the CRs brew's git wrote are gone: either the fixture did not produce the"
-    echo "state it claims to, or the script rewrote a clone it does not own"
+    echo "the clone's formula has no CR bytes, so the global core.autocrlf this case"
+    echo "installs did not reach the git brew ran, and the refusal came from"
+    echo "something other than the divergence this case is about"
+    bad=1
+  fi
+  if [ ! -f "$saved" ]; then
+    echo "the stub saved no copy of the formula it cloned ($saved), so there is"
+    echo "nothing to compare the clone against and 'bytes intact' is unevidenced"
+    bad=1
+  elif ! cmp -s "$saved" "$1/tap-clone/Formula/rumdl.rb"; then
+    echo "the clone's formula is not the bytes brew's git left there, so the script"
+    echo "rewrote a clone it does not own:"
+    diff "$saved" "$1/tap-clone/Formula/rumdl.rb" | sed 's/^/  /' | head -6
     bad=1
   fi
   return "$bad"
@@ -1502,13 +1550,33 @@ assert_fresh_tap_refused_formula_absent() { # <casedir>
 # A refusal is only a refusal if it stopped the thing it was protecting. The byte check
 # sits above the brew checks precisely so audit, style and install never see a formula
 # nothing validated, and "the message was printed" does not establish that.
+#
+# Read from the stub's own log of what brew was asked to do, not from the script's
+# progress line: that line is printed by the script, so a regression that ran `brew audit`
+# before printing it - or stopped printing it - passed this assertion while auditing bytes
+# nothing validated. The line is still checked, because it is the cheaper signal and it
+# names the stage in the output a contributor reads.
 assert_refused_before_brew_checks() { # <casedir>
+  local bad=0 calls
+  calls="$1/stub/brew.calls"
   if grep -q '^==> brew audit' "$1/out.txt"; then
     echo "the run printed the refusal and then ran the brew checks anyway, which is what"
     echo "the refusal exists to prevent:"
     sed 's/^/  /' "$1/out.txt" | tail -8
-    return 1
+    bad=1
   fi
+  if [ ! -f "$calls" ]; then
+    echo "no record of any brew invocation at $calls, so this assertion cannot observe"
+    echo "whether the brew checks ran. The run reaches \`brew --repository\` before any"
+    echo "refusal, so an empty log means the brew stub was never installed and the case"
+    echo "is not testing what it claims to."
+    bad=1
+  elif grep -Eq '^(audit|style|install|test|fetch|reinstall|uninstall)( |$)' "$calls"; then
+    echo "brew was invoked for a check the refusal exists to prevent:"
+    grep -E '^(audit|style|install|test|fetch|reinstall|uninstall)( |$)' "$calls" | sed 's/^/  brew /'
+    bad=1
+  fi
+  return "$bad"
 }
 
 # The de-ignored file: refreshed, and the file still there. Both halves, and the residue
@@ -1681,12 +1749,12 @@ assert_hatch_restored_hidden_path() { # <casedir>
   fi
   rel="$(cat "$1/hidden-path")"
   if [ ! -f "$1/tap-clone/$rel" ]; then
-    echo "the clone's $rel is gone. The hatch said everything HEAD tracks goes back to"
+    echo "the clone's $rel is gone. The hatch said every file HEAD tracks goes back to"
     echo "HEAD's bytes, and HEAD tracks that path, so removing it is not that"
     bad=1
   elif cmp -s "$1/hidden-bytes" "$1/tap-clone/$rel"; then
     echo "the clone's $rel still holds the local bytes, so the run announced that"
-    echo "everything HEAD tracks goes back to HEAD's bytes and then left this path"
+    echo "every file HEAD tracks goes back to HEAD's bytes and then left this path"
     echo "alone - the promise is wrong again, in the other direction"
     bad=1
   elif ! clone_git "$1" cat-file blob "HEAD:$rel" | cmp -s - "$1/tap-clone/$rel"; then
@@ -1918,6 +1986,26 @@ case_run "macOS pairs swapped between the intel and arm branches" 1 \
   "the macos:intel branch must carry x86_64-apple-darwin" \
   verify-formula.sh < "$WORK/macswap.rb"
 
+# The same defect reached the other way: the urls stay where they are and the
+# CONDITION is inverted, so Ruby sends each archive to the other machine while
+# the file still reads as four correctly arranged branches. The branch check
+# above cannot see it - it compares a url's filename against the branch it was
+# told the url is in, and until this round the branch was assigned by noticing
+# `Hardware::CPU.intel?` anywhere on the line, negation included. Measured on
+# the committed formula: with the condition negated, every structural check
+# passed and the run went on to download and compare all four pins, on a formula
+# that gives an arm64 Mac the x86_64 archive and an Intel Mac none at all.
+sed 's|^    if Hardware::CPU.intel?$|    if !Hardware::CPU.intel?|' "$FORMULA" > "$WORK/negated.rb"
+assert_mutated "$WORK/negated.rb"
+CASE_ASSERT=assert_refused_before_download
+case_run "a platform branch whose condition is negated" 1 \
+  "decides a platform branch in a way this script does not read" \
+  verify-formula.sh < "$WORK/negated.rb"
+
+# Its positive control is the "a comment naming the other CPU predicate" case
+# further down, which needs the fixture formula and so has to wait until that is
+# built.
+
 # A platform dropped entirely. The url, sha256 and pair counts all stay in
 # agreement, so no count check sees it. The expected-platform list is what
 # rejects it, and the branch-exactly-once check further down independently
@@ -2040,6 +2128,41 @@ CASE_STUBS=stubs_verifier
 case_run "a formula pinned to the bytes its urls fetch verifies clean" 0 \
   "All 4 pins match the artifacts their urls fetch, at version $CUR_VERSION" \
   verify-formula.sh < "$WORK/fixture-pinned.rb"
+
+# The positive control for the negated-condition refusal above, and the reason
+# that refusal is anchored to whole lines instead of rejecting every mention of
+# Hardware::CPU: a comment inside a branch that names the OTHER predicate must
+# leave the branch alone. Reading conditions by substring moved the Intel url
+# into the arm branch and failed the run for carrying the wrong target, so both
+# directions have a case. It has to be the fixture formula rather than the
+# committed one, because this case requires a clean verification and that needs
+# assets a stub can serve.
+if ! python3 - "$WORK/fixture-pinned.rb" > "$WORK/branch-comment.rb" <<'PY'
+import sys
+t = open(sys.argv[1]).read()
+anchor = "    if Hardware::CPU.intel?\n"
+i = t.index(anchor) + len(anchor)
+out = t[:i] + "      # Not Hardware::CPU.arm?, which this comment only mentions.\n" + t[i:]
+assert out != t, "the anchor was found but nothing was inserted"
+sys.stdout.write(out)
+PY
+then
+  echo "HARNESS FAILURE: the comment could not be inserted into the fixture formula," >&2
+  echo "                 so the next case would test an unmodified fixture." >&2
+  exit 1
+fi
+# assert_mutated compares against $FORMULA, so it is vacuous for a file derived
+# from the fixture: the fixture already differs from the committed formula. The
+# comparison has to be against the file the insertion was made into.
+if cmp -s "$WORK/branch-comment.rb" "$WORK/fixture-pinned.rb"; then
+  echo "HARNESS FAILURE: $WORK/branch-comment.rb is byte-identical to the fixture" >&2
+  echo "                 it was derived from, so the comment is not in it." >&2
+  exit 1
+fi
+CASE_STUBS=stubs_verifier
+case_run "a comment naming the other CPU predicate leaves the branch alone" 0 \
+  "All 4 pins match the artifacts their urls fetch" \
+  verify-formula.sh < "$WORK/branch-comment.rb"
 
 # And one pin replaced by a placeholder, which is what a half-finished update
 # leaves behind. Three assets still verify, so the run is proved to have got
@@ -2368,7 +2491,7 @@ CASE_STUBS=stubs_validator
 CASE_ENV=case_env_discard_tap_clone
 CASE_ASSERT=assert_clone_refreshed
 case_run "DISCARD_TAP_CLONE=1 discards the tracked edit it says it discards" 0 \
-  "Everything HEAD tracks there goes back to HEAD's bytes" validate-formula.sh < "$FORMULA"
+  "Every file HEAD tracks there goes back to HEAD's bytes" validate-formula.sh < "$FORMULA"
 
 # And the bound on the hatch, which is the case that keeps `checkout -f` out of this
 # script. The hatch is asked for and there is also an ignored file the fetched commit
@@ -2514,7 +2637,8 @@ case_run "a fresh tap is validated as the commit brew cloned" 0 \
 # A global core.autocrlf reaches brew's clone, and the wrapper's overrides do not: they
 # are arguments to commands this script runs, and this clone is not one of them. So the
 # formula brew audits holds CRs no commit contains, and only the bytes afterwards can
-# say so.
+# say so. The fixture installs that setting as a real global config the clone inherits,
+# so the case establishes the mechanism and not just the resulting bytes.
 CASE_SETUP=setup_clone_untapped
 CASE_STUBS=stubs_validator_untapped_eol
 CASE_ASSERT=assert_fresh_tap_refused_with_bytes_intact

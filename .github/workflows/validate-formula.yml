@@ -5,13 +5,22 @@ name: Validate Formula
 # catch it. It does cost a full four-platform brew matrix for a typo fix, which is
 # the price of keeping that lint next to the binary that performs it rather than
 # installing rumdl a second time in a job of its own.
+#
+# Every workflow file, not just this one. The `pins` job below runs actionlint over
+# `.github/workflows/`, and naming only this file left the other workflow - the one that
+# rewrites the formula and pushes it - outside the filter, so a commit touching only
+# update-formula.yml started no run and was never linted. Three of the eight commits that
+# have ever touched that file changed nothing else, so the shape is the common one rather
+# than the exception. The daily schedule ignores path filters and would have caught it
+# eventually; a lint that runs a day after the merge is not the lint this repository
+# thinks it has.
 on:
   pull_request:
     paths:
       - 'Formula/**'
       - 'scripts/**'
       - '*.md'
-      - '.github/workflows/validate-formula.yml'
+      - '.github/workflows/**'
   push:
     branches:
       - main
@@ -19,7 +28,7 @@ on:
       - 'Formula/**'
       - 'scripts/**'
       - '*.md'
-      - '.github/workflows/validate-formula.yml'
+      - '.github/workflows/**'
   # The tap can break with no commit to this repository at all: a release
   # dispatch that never arrives leaves it a version behind, and GitHub release
   # assets can be replaced after publication, which makes an already-correct pin

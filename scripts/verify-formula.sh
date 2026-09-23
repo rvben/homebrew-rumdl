@@ -63,11 +63,29 @@ CURL_OPTS=(
 # exactly what Homebrew acts on, so it is what has to be checked. The branch
 # comes along because the pair alone says nothing about which machine Homebrew
 # will hand it to - see the target/arch checks below.
+#
+# The two condition patterns are anchored whole-line, and any other line
+# mentioning Hardware::CPU is an error rather than something to interpret,
+# because the branch a url sits in has to be read the way Ruby reads it and not
+# by noticing a predicate somewhere on the line. Matching `Hardware::CPU.intel?`
+# anywhere bound the context by substring: measured on this formula, changing
+# `if Hardware::CPU.intel?` to `if !Hardware::CPU.intel?` - or to `unless` -
+# left every check here satisfied and reported all four pins matching, on a
+# formula that hands an arm64 Mac the x86_64 archive and an Intel Mac no archive
+# at all. Comment lines are skipped for the same reason from the other side: a
+# comment naming the other predicate used to move the url into the other branch,
+# so `# not Hardware::CPU.arm? here` inside the Intel branch failed the run with
+# a message about the wrong branch carrying the wrong target.
 pairs="$(awk '
+  /^[[:space:]]*#/ { next }
   /^[[:space:]]*on_macos do/ { os = "macos"; cpu = ""; next }
   /^[[:space:]]*on_linux do/ { os = "linux"; cpu = ""; next }
-  /Hardware::CPU\.intel\?/   { cpu = "intel"; next }
-  /Hardware::CPU\.arm\?/     { cpu = "arm";   next }
+  /^[[:space:]]*(els)?if[[:space:]]+Hardware::CPU\.intel\?[[:space:]]*$/ { cpu = "intel"; next }
+  /^[[:space:]]*(els)?if[[:space:]]+Hardware::CPU\.arm\?[[:space:]]*$/   { cpu = "arm";   next }
+  /Hardware::CPU/ {
+    print "UNPARSED\tline " NR " decides a platform branch in a way this script does not read: " $0
+    exit
+  }
   /^[[:space:]]*url "/ {
     if (match($0, /"https:[^"]*"/)) {
       pending = substr($0, RSTART + 1, RLENGTH - 2)
@@ -93,6 +111,20 @@ pairs="$(awk '
 unpaired="$(printf '%s\n' "$pairs" | sed -n 's/^UNPAIRED	//p')"
 if [ -n "$unpaired" ]; then
   echo "error: $unpaired" >&2
+  exit 1
+fi
+
+# A condition this script cannot read is a refusal, not a default. Guessing the
+# branch is how a negated condition passed: the alternative to failing here is
+# binding a url to the machine that will not get it.
+unparsed="$(printf '%s\n' "$pairs" | sed -n 's/^UNPARSED	//p')"
+if [ -n "$unparsed" ]; then
+  echo "error: $unparsed" >&2
+  echo "       Each platform branch must be exactly \`if Hardware::CPU.intel?\` or" >&2
+  echo "       \`elsif Hardware::CPU.arm?\` (or the intel/arm pair the other way" >&2
+  echo "       round), with nothing else on the line. Homebrew evaluates the" >&2
+  echo "       condition; this script has to agree with it about which machine" >&2
+  echo "       each url is for, and it can only do that for those two shapes." >&2
   exit 1
 fi
 

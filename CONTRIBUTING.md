@@ -164,9 +164,11 @@ to know:
   your checkout does not have, or a path marked `assume-unchanged` or
   `skip-worktree`, which git does not stat and so cannot report as clean. Stash
   them, copy them into your checkout, or run with `DISCARD_TAP_CLONE=1`. That
-  hatch resets the clone to its own `HEAD` first, so everything `HEAD` tracks
-  there goes back to `HEAD`'s bytes, and an unfinished merge or rebase is cleared
-  with it. Two shapes of that are worth naming, because `git status` reports
+  hatch resets the clone to its own `HEAD` first, so every file `HEAD` tracks
+  there goes back to `HEAD`'s bytes, and an unfinished merge is cleared with it.
+  An interrupted rebase is not: measured on git 2.50.1, `.git/rebase-merge`
+  survives both the reset and the refresh, and the clone is still rebasing
+  afterwards. Two shapes of that are worth naming, because `git status` reports
   neither as a modified file: an edit to a path marked `assume-unchanged`, and a
   path staged as deleted whose own bytes are still standing there, which status
   calls untracked as well as deleted. A path `HEAD` does not track is not
@@ -177,7 +179,11 @@ to know:
   overwrite, and a path marked `skip-worktree`, whose local bytes the reset
   honours - if the new commit changes that path the refresh aborts, and if it does
   not, the check that compares what brew is about to read against the commit under
-  validation refuses instead. Move or unmark those yourself.
+  validation refuses instead. Move or unmark those yourself. One more shape is
+  named for accuracy rather than guarded: a submodule's own working tree is not
+  reset with the superproject, so an edit inside one survives. This repository
+  has no submodules, so a clone of it cannot have one without a commit that adds
+  it.
 - Run it from your own checkout, never from the tap clone. `brew --repository
   rvben/rumdl` is a full clone of this repository, `scripts/` included, so
   running it there is easy to reach by accident, and then the directory being
@@ -189,10 +195,13 @@ to know:
 ## Continuous integration
 
 `.github/workflows/validate-formula.yml` runs on pull requests, on pushes to
-`main` that touch `Formula/**`, `scripts/**` or any root `*.md`, daily on a
-schedule, and on explicit dispatch. The markdown is in that list because the
-`brew` job lints it: leaving it out meant a documentation-only change was the one
-change that skipped the check for it. Its jobs:
+`main` that touch `Formula/**`, `scripts/**`, `.github/workflows/**` or any root
+`*.md`, daily on a schedule, and on explicit dispatch. The markdown is in that
+list because the `brew` job lints it: leaving it out meant a documentation-only
+change was the one change that skipped the check for it. Both workflow files are
+in it for the same reason from the other side: the `pins` job is what lints the
+workflows, and while the filter named only this file, a commit touching only
+`update-formula.yml` started no run at all. Its jobs:
 
 - `pins`: `shellcheck` over every script, `actionlint` over the workflows, then
   `scripts/test-guards.sh`, then every platform's pin from one runner, without

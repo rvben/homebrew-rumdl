@@ -341,6 +341,9 @@ if brew tap | grep -qx rvben/rumdl; then
     #   staged deletion, bytes left status "D  f.rb" and "?? f.rb", reset DESTROYS them
     #   untracked path              kept
     #   ignored path                kept
+    #   unfinished merge            MERGE_HEAD gone, working tree clean
+    #   interrupted rebase          .git/rebase-merge STAYS, status still says rebasing
+    #   edited file in a submodule  kept; the superproject still reports " m <path>"
     #
     # So the two flags do not behave alike, and "untracked files are left in place" was
     # false for the one untracked path HEAD still tracks: git restores the staged
@@ -348,8 +351,15 @@ if brew tap | grep -qx rvben/rumdl; then
     # sense - the contributor asked for tracked edits to go - and both are listed above
     # before anything runs, the hidden ones under their own count. What was wrong was the
     # promise, not the behaviour.
+    #
+    # The last two arms are why the sentence below says "a path HEAD tracks" rather than
+    # "everything": a submodule's own working tree is not reset with the superproject, and
+    # a rebase left in progress survives both the reset and the checkout. Neither can
+    # occur in a clone of THIS repository - it has no submodules, and the refresh has no
+    # reason to rebase - so both are stated for the sentence's accuracy rather than
+    # guarded.
     echo "    DISCARD_TAP_CLONE=1: proceeding over $(printf '%s' "$dirty" | grep -c . ) changed path(s), $(printf '%s' "$hidden" | grep -c . ) path(s) git was told not to look at, and $ahead local commit(s)"
-    echo "    Everything HEAD tracks there goes back to HEAD's bytes - including an edit"
+    echo "    Every file HEAD tracks there goes back to HEAD's bytes - including an edit"
     echo "    git was told not to stat, and a path staged as deleted while HEAD still"
     echo "    tracks it. A path HEAD does not track is not touched."
     # And this is what makes that sentence true. The refresh below is a NON-forced
