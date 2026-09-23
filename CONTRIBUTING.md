@@ -5,7 +5,11 @@ Thank you for considering contributing to the rumdl Homebrew tap!
 ## The invariant that matters most
 
 Every `sha256` in `Formula/rumdl.rb` must be the hash of the artifact fetched by
-the `url` directly above it, and every `url` must name the same version.
+the `url` directly above it, and every `url` must name the same version, fetch
+from rumdl's own releases, and contain a `rumdl` binary to install. The formula
+must also still ship all four platforms: removing a `url` and its `sha256`
+together leaves every count in agreement, so `verify-formula.sh` holds the
+expected platform list itself rather than deriving it from the file.
 
 `brew audit` and `brew style` do not check either of those things. A formula can
 pass both while pinning the wrong artifact's hash, in which case `brew install`
@@ -34,6 +38,22 @@ belonging to a different artifact than the url beside it. If any asset cannot be
 downloaded it aborts and leaves the formula untouched, rather than bumping the
 version while one platform keeps the previous release's hash.
 
+It needs the GitHub CLI, because it checks each asset's Sigstore build provenance
+(`gh attestation verify --repo rvben/rumdl --signer-workflow ...`) before pinning
+it. A hash proves the bytes have not changed since they were hashed; the
+attestation is what ties them to a rumdl release build.
+
+Three things it refuses to do quietly, each with an escape hatch for when you
+mean it:
+
+- **Re-pin a version the formula already names**, when the published assets now
+  hash differently (`ALLOW_REPIN=1`). This is the asset-replacement case, and it
+  changes what users get under a version they already have.
+- **Move the tap to an older version** (`ALLOW_DOWNGRADE=1`). The version comes
+  from a dispatch payload and is otherwise taken on trust.
+- **Pin an asset with no valid provenance** (`ALLOW_UNATTESTED=1`). Needed for
+  releases old enough to predate attestation, and nothing else.
+
 Normally you do not run it at all: rumdl's release workflow sends a
 `repository_dispatch` and `.github/workflows/update-formula.yml` does the above,
 commits, pushes, and then asks Validate Formula to run.
@@ -58,13 +78,24 @@ This runs what CI runs, in the same order. Two things to know:
 ## Continuous integration
 
 `.github/workflows/validate-formula.yml` runs on pull requests, on pushes to
-`main` that touch `Formula/**` or `scripts/**`, and on explicit dispatch:
+`main` that touch `Formula/**` or `scripts/**`, daily on a schedule, and on
+explicit dispatch. Its jobs:
 
 - `pins`: every platform's pin, from one runner, without Homebrew.
-- `audit-and-test`: `brew audit`, `brew style`, `brew install`, `brew test` on
-  macOS and Linux. Each runner can only check the pin for the platform it runs
-  on, which is why the `pins` job exists.
-- `strict-audit`: `brew audit --strict --online`.
+- `brew`: `scripts/validate-formula.sh --install` on macOS and Linux, which is
+  `brew audit`, `brew style`, `brew audit --strict --online`, `brew install` and
+  `brew test`. Each runner can only check the pin for the platform it runs on,
+  which is why the `pins` job exists.
+- `freshness` (scheduled and manual runs only): is the formula still pointing at
+  rumdl's newest release? Nothing else asks. The update arrives as a dispatch
+  from rumdl's release workflow, whose notify step is `continue-on-error: true`,
+  so a lost dispatch leaves this tap behind with both repositories green.
+
+The daily schedule exists because this tap can break with no commit to it. A
+GitHub release asset can be replaced after publication, which makes a correct
+pin wrong: v0.2.76 had two successful `Release` runs on one tag, publishing two
+different macOS binaries, and until the tap was re-pinned every `brew install`
+failed checksum verification.
 
 One caveat worth knowing, because it silently disabled this workflow for its
 first eleven months: a push made by a workflow using `GITHUB_TOKEN` does not

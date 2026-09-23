@@ -21,6 +21,19 @@ brew install rumdl
 Either is a fine way to get rumdl. The core formula is usually the easier one,
 since it installs from a bottle instead of downloading a release tarball.
 
+Only one of them at a time, though: Homebrew refuses to have two formulae of the
+same name from different taps installed together, so trying the second one after
+the first aborts with "Formulae with the same name from different taps cannot be
+installed at the same time". To switch, uninstall first:
+
+```bash
+brew uninstall rumdl
+brew install rvben/rumdl/rumdl
+```
+
+Both formulae install shell completions, so switching does not cost you
+`rumdl <TAB>`.
+
 ## Updating
 
 To update rumdl to the latest version:
