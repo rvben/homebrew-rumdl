@@ -3519,6 +3519,19 @@ stubs_validator_install_binary_silent() {
   stubs_validator_install "$1" || return 1
   printf 'error: could not read configuration\n' > "${1%/stub}/keg/bin/rumdl.badtext"
 }
+# rumdl's third exit code: 2, which it uses when it could not run at all - an
+# unparseable .rumdl.toml, a missing argument, a crash - having linted nothing. The
+# output still names the rule here, so the substring bound is satisfied and only an
+# EXACT reading of the code refuses it. This is the arm the guard was written for: the
+# previous version spelled the check `if ! rumdl check`, which accepts any nonzero code
+# as proof the binary detects MD022, and the two arms above cannot tell an exact
+# comparison from that one.
+stubs_validator_install_binary_cannot_run() {
+  stubs_validator_install "$1" || return 1
+  printf '2\n' > "${1%/stub}/keg/bin/rumdl.badcode"
+  printf 'error: could not parse .rumdl.toml; MD022 was never evaluated\n' \
+    > "${1%/stub}/keg/bin/rumdl.badtext"
+}
 
 brew_calls_or_fail() { # brew_calls_or_fail <casedir>
   if [ ! -f "$1/stub/brew.calls" ]; then
@@ -3644,6 +3657,13 @@ CASE_SETUP=setup_install_nothing
 CASE_STUBS=stubs_validator_install_binary_silent
 case_run "a binary that exits 1 without naming the rule fails the output bound" 1 \
   "did not contain \"MD022\"" validate-formula.sh --install < "$FORMULA"
+
+# And the third code, which is the one neither case above can distinguish: nothing ran,
+# but the output mentions the rule, so only reading the code exactly refuses it.
+CASE_SETUP=setup_install_nothing
+CASE_STUBS=stubs_validator_install_binary_cannot_run
+case_run "a binary that could not run is not read as having found violations" 1 \
+  "exited 2 (want 1)" validate-formula.sh --install < "$FORMULA"
 
 echo
 if [ "$fail" -ne 0 ]; then
