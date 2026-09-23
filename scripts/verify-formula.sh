@@ -140,7 +140,7 @@ if [ -z "$versions" ]; then
 fi
 if [ "$version_count" != "1" ]; then
   echo "error: the urls in $FORMULA name more than one version:" >&2
-  printf '  %s\n' $versions >&2
+  printf '%s\n' "$versions" | sed 's/^/  /' >&2
   exit 1
 fi
 VERSION="$versions"
