@@ -3,3 +3,7 @@
 *~
 .vscode/
 .idea/
+
+# Local working notes. This repository is public, so the entry belongs here and
+# not only in a global ignore file that a fresh clone does not carry.
+.claude/
