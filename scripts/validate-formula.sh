@@ -26,6 +26,33 @@ esac
 cd "$(dirname "$0")/.."
 TAP_DIR="$PWD"
 
+# `git -C <dir>` does not override GIT_DIR. With GIT_DIR set - which git exports to
+# every hook it runs, and a pre-push hook calling this script is the obvious way
+# to make the local gate automatic - every git command below reads and writes the
+# repository GIT_DIR names rather than the one `-C` points at, including the one
+# that decides whether the tap clone holds work worth keeping, three lines above
+# a `reset --hard` and a `clean -fd`. Verified: `GIT_DIR=$other/.git git -C "$repo"
+# rev-parse --short HEAD` prints the OTHER repository's commit.
+#
+# Cleared rather than refused, so running this from a hook keeps working, and
+# announced rather than cleared silently, because changing which repository a
+# command means is not something to do quietly.
+git_overrides=""
+for _v in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+          GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE; do
+  if [ -n "${!_v:-}" ]; then
+    git_overrides="$git_overrides $_v"
+  fi
+done
+if [ -n "$git_overrides" ]; then
+  echo "==> Clearing inherited git repository overrides:$git_overrides"
+  echo "    They redirect every git command in this script, including the check"
+  echo "    that decides whether refreshing the tap clone would destroy work."
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE
+  echo
+fi
+
 command -v brew >/dev/null 2>&1 || {
   echo "error: Homebrew is not installed" >&2
   echo "The pin check alone needs no brew: scripts/verify-formula.sh" >&2
@@ -90,22 +117,35 @@ echo
 # clean `brew audit`, a passing `brew test` and a final "all checks passed" line
 # from a run that never looked at it. So the run says which tree answered, and
 # says so again at the end, where the claim is made.
+# Three states, not two. "There is no HEAD to compare against" is a different
+# fact from "the formula matches HEAD", and reading the first as the second is how
+# a checkout with no commits at all - a fresh `git init`, a clone interrupted
+# before its first fetch - collects a report saying the committed formula was
+# audited.
 HEAD_SHA=""
-FORMULA_UNCOMMITTED=0
-if git -C "$TAP_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+FORMULA_STATE=committed
+if ! git -C "$TAP_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+  FORMULA_STATE=unknown
+else
   HEAD_SHA="$(git -C "$TAP_DIR" rev-parse --short HEAD)"
   # `diff HEAD` covers staged and unstaged alike; `ls-files --error-unmatch`
   # covers the formula being untracked, which `diff` reports as no difference.
   if ! git -C "$TAP_DIR" ls-files --error-unmatch Formula/rumdl.rb >/dev/null 2>&1 ||
      ! git -C "$TAP_DIR" diff --quiet HEAD -- Formula/rumdl.rb; then
-    FORMULA_UNCOMMITTED=1
+    FORMULA_STATE=uncommitted
   fi
 fi
-if [ "$FORMULA_UNCOMMITTED" -eq 1 ]; then
+if [ "$FORMULA_STATE" = uncommitted ]; then
   echo "==> WARNING: Formula/rumdl.rb differs from HEAD ($HEAD_SHA)"
   echo "    The pin check above read your working tree. Every brew check below"
   echo "    reads a clone of this repository at HEAD, so your edit is NOT what"
   echo "    brew audits, installs or tests. Commit it first to validate it."
+  echo
+elif [ "$FORMULA_STATE" = unknown ]; then
+  echo "==> WARNING: $TAP_DIR has no HEAD commit"
+  echo "    Whether Formula/rumdl.rb is committed cannot be determined, so this"
+  echo "    run cannot say which bytes the brew checks below read. Commit the"
+  echo "    formula, then re-run to get an answer that names a commit."
   echo
 fi
 
@@ -197,10 +237,15 @@ brew audit --strict --online rvben/rumdl/rumdl
 echo
 
 if [ "$WITH_INSTALL" -eq 0 ]; then
-  echo "Pins pass against this working tree. Audit and style pass against ${HEAD_SHA:-HEAD}."
+  if [ "$FORMULA_STATE" = unknown ]; then
+    echo "Pins pass against this working tree. Audit and style pass against a clone"
+    echo "of a repository with no HEAD, so which bytes they read is unrecorded."
+  else
+    echo "Pins pass against this working tree. Audit and style pass against $HEAD_SHA."
+  fi
   # Spelled as an `if`: a bare `[ ... ] && echo` is a statement that returns 1
   # when the test is false, which under `set -e` ends the run here.
-  if [ "$FORMULA_UNCOMMITTED" -eq 1 ]; then
+  if [ "$FORMULA_STATE" = uncommitted ]; then
     echo "Your uncommitted Formula/rumdl.rb was NOT audited. Commit it and re-run."
   fi
   echo "Install and test not run; pass --install for those."
@@ -354,9 +399,15 @@ echo "==> The installed binary lints this repository's own docs"
 "$RUMDL" check --no-config README.md CONTRIBUTING.md
 echo
 
-echo "Pins pass against this working tree. Audit, style, install and test pass"
-echo "against ${HEAD_SHA:-HEAD}, which is what brew read."
-if [ "$FORMULA_UNCOMMITTED" -eq 1 ]; then
+if [ "$FORMULA_STATE" = unknown ]; then
+  echo "Pins pass against this working tree. Audit, style, install and test pass"
+  echo "against a clone of a repository with no HEAD, so which bytes they read is"
+  echo "unrecorded."
+else
+  echo "Pins pass against this working tree. Audit, style, install and test pass"
+  echo "against $HEAD_SHA, which is what brew read."
+fi
+if [ "$FORMULA_STATE" = uncommitted ]; then
   echo "Your uncommitted Formula/rumdl.rb was NOT installed or tested. Commit it"
   echo "and re-run: nothing below the pin check looked at it."
 fi
