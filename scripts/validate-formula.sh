@@ -34,22 +34,33 @@ TAP_DIR="$PWD"
 # a `reset --hard` and a `clean -fd`. Verified: `GIT_DIR=$other/.git git -C "$repo"
 # rev-parse --short HEAD` prints the OTHER repository's commit.
 #
+# The GIT_CONFIG_* group is here for the same reason one step removed: it does not
+# change which repository a command reads, it changes what that command is willing
+# to report about it. GIT_CONFIG_COUNT with status.showUntrackedFiles=no makes the
+# inventory below come back empty on a clone full of untracked files. Verified:
+# `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.showUntrackedFiles
+# GIT_CONFIG_VALUE_0=no git status --porcelain` prints nothing beside an untracked
+# file, and the explicit --untracked-files flag on the status call overrides it.
+#
 # Cleared rather than refused, so running this from a hook keeps working, and
 # announced rather than cleared silently, because changing which repository a
 # command means is not something to do quietly.
 git_overrides=""
 for _v in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
-          GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE; do
+          GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE \
+          GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM; do
   if [ -n "${!_v:-}" ]; then
     git_overrides="$git_overrides $_v"
   fi
 done
 if [ -n "$git_overrides" ]; then
   echo "==> Clearing inherited git repository overrides:$git_overrides"
-  echo "    They redirect every git command in this script, including the check"
-  echo "    that decides whether refreshing the tap clone would destroy work."
+  echo "    They redirect every git command in this script, or narrow what it will"
+  echo "    report, including the check that decides whether refreshing the tap"
+  echo "    clone would destroy work."
   unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
-        GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE
+        GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE \
+        GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM
   echo
 fi
 
@@ -181,7 +192,34 @@ if brew tap | grep -qx rvben/rumdl; then
   # rvben/rumdl/rumdl` edits precisely this clone - it is where a contributor's
   # experiment plausibly lives. So look before overwriting: uncommitted changes,
   # untracked files, and commits the clone has that this checkout does not.
-  dirty="$(git -C "$tap_repo" status --porcelain)"
+  # `status --porcelain` is a complete inventory only while nothing has told git to
+  # stop looking, and two things do, both by printing nothing rather than failing.
+  #
+  # status.showUntrackedFiles=no hides every untracked file - which is exactly what
+  # `clean -fd` deletes - and it can come from the clone's own config, from a global
+  # config, or from the environment. An --untracked-files on the command line beats
+  # all three, so the inventory asks for the listing it needs instead of accepting
+  # the one configuration chose.
+  dirty="$(git -C "$tap_repo" status --porcelain --untracked-files=normal)"
+  # assume-unchanged and skip-worktree tell git not to stat a tracked file at all,
+  # so an edit to it is reported by neither `status` nor `diff --quiet HEAD`, and
+  # `reset --hard` overwrites it. No flag turns that off: whether those files hold
+  # edits is genuinely unknown here, and unknown is not the same fact as clean
+  # immediately before a destructive command, so they count as work. Verified: with
+  # rumdl.rb assume-unchanged and rewritten, status prints nothing and `git diff
+  # --quiet HEAD` exits 0, while `ls-files -v` tags it `h`.
+  if ! index_flags="$(git -C "$tap_repo" ls-files -v 2>&1)"; then
+    echo "error: could not read the index of the rvben/rumdl tap clone" >&2
+    echo "       $tap_repo" >&2
+    printf '%s\n' "$index_flags" | sed 's/^/         /' >&2
+    echo "       Refreshing it means reset --hard and clean -fd, and whether that" >&2
+    echo "       would destroy anything is exactly what could not be determined." >&2
+    exit 1
+  fi
+  # Lowercase tag: assume-unchanged. S: skip-worktree. awk rather than grep so that
+  # "nothing is hidden" stays an exit status of 0 under set -e.
+  hidden="$(printf '%s\n' "$index_flags" |
+    awk '$1 ~ /^([a-z]|S)$/ { $1 = ""; sub(/^ /, ""); print }')"
   # Not `|| echo 0`. Zero here means "the clone holds no commits your checkout
   # lacks", and that answer is what permits the reset --hard and clean -qfd below.
   # A rev-list that failed - a corrupt clone, an unreadable object, a FETCH_HEAD
@@ -196,12 +234,17 @@ if brew tap | grep -qx rvben/rumdl; then
     echo "       Inspect the clone, or drop the tap (brew untap rvben/rumdl)." >&2
     exit 1
   fi
-  if { [ -n "$dirty" ] || [ "$ahead" != "0" ]; } && [ "${DISCARD_TAP_CLONE:-0}" = "1" ]; then
-    echo "    DISCARD_TAP_CLONE=1: discarding $(printf '%s' "$dirty" | grep -c . ) changed path(s) and $ahead local commit(s)"
-  elif [ -n "$dirty" ] || [ "$ahead" != "0" ]; then
+  if { [ -n "$dirty" ] || [ -n "$hidden" ] || [ "$ahead" != "0" ]; } &&
+     [ "${DISCARD_TAP_CLONE:-0}" = "1" ]; then
+    echo "    DISCARD_TAP_CLONE=1: discarding $(printf '%s' "$dirty" | grep -c . ) changed path(s), $(printf '%s' "$hidden" | grep -c . ) path(s) git was told not to look at, and $ahead local commit(s)"
+  elif [ -n "$dirty" ] || [ -n "$hidden" ] || [ "$ahead" != "0" ]; then
     echo "error: the rvben/rumdl tap clone holds work this would destroy" >&2
     echo "       $tap_repo" >&2
     [ -n "$dirty" ] && printf '%s\n' "$dirty" | sed 's/^/         /' >&2
+    if [ -n "$hidden" ]; then
+      printf '%s\n' "$hidden" | sed 's/^/         marked assume-unchanged or skip-worktree: /' >&2
+      echo "         git does not stat those, so whether they hold edits is unknown" >&2
+    fi
     [ "$ahead" != "0" ] && echo "         $ahead commit(s) not in $TAP_DIR" >&2
     echo "       Refreshing it means reset --hard and clean -fd, so this stops here." >&2
     echo "       Keep the work (git -C \"$tap_repo\" stash, or copy it into $TAP_DIR)," >&2
