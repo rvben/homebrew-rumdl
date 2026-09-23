@@ -411,8 +411,19 @@ if [ "$failed" -ne 0 ]; then
     echo "    re-pinning would pin the same unusable archive under a fresh hash."
     ;;
   esac
-  case " $kinds " in *" format "*|*" mismatch "*)
+  # Two kinds, one action, and still two diagnoses: a pin that is not 64 hex
+  # characters is not a hash of anything, which a half-finished edit leaves behind
+  # and which "not the hash of its artifact" understates.
+  case " $kinds " in *" format "*)
+    echo "  - A pin is not 64 hexadecimal characters, so the formula is malformed"
+    echo "    rather than out of date."
+    ;;
+  esac
+  case " $kinds " in *" mismatch "*)
     echo "  - A pin is not the hash of the artifact its url fetches."
+    ;;
+  esac
+  case " $kinds " in *" format "*|*" mismatch "*)
     echo "    Run scripts/update-formula.sh $VERSION to regenerate the pins."
     ;;
   esac

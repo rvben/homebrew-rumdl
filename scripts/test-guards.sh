@@ -2680,8 +2680,21 @@ bad_pin() { # bad_pin <pin> <outfile>
 bad_pin "$(printf 'z%.0s' $(seq 64))" "$WORK/pin-nonhex.rb"
 bad_pin "0123abcd" "$WORK/pin-short.rb"
 
+# The first of the two also checks the summary's own line for this failure, which
+# is not the mismatch line: a value that is not hexadecimal is not the hash of
+# anything, so "not the hash of its artifact" would understate a malformed formula.
+assert_format_bullet() { # <casedir>
+  assert_only_the_pin_format_failed "$1" || return 1
+  if ! grep -qF 'so the formula is malformed' "$1/out.txt"; then
+    echo "the summary did not say the formula is malformed, so a pin that is not a"
+    echo "hash at all was summarised as a hash that does not match:"
+    sed 's/^/  /' "$1/out.txt" | tail -8
+    return 1
+  fi
+}
+
 CASE_STUBS=stubs_verifier
-CASE_ASSERT=assert_only_the_pin_format_failed
+CASE_ASSERT=assert_format_bullet
 case_run "a 64-character pin that is not hexadecimal" 1 \
   "pinned sha256 is not 64 hex characters" \
   verify-formula.sh < "$WORK/pin-nonhex.rb"
@@ -2700,7 +2713,11 @@ case_run "a hexadecimal pin that is not 64 characters" 1 \
 #
 # A wrong hash, first, as the positive control for the re-pin instruction: the pin
 # is another target's fixture hash, so it is a well-formed pin of the wrong bytes
-# and the loop reaches the comparison rather than the format check.
+# and the loop reaches the comparison rather than the format check. Stated plainly
+# because the suite's record should not read as three binding cases: this one is
+# satisfiable by the summary that printed the re-pin line for every failure, which
+# is precisely what makes it the control for the line's retention. The two below
+# are the binding ones.
 FIXTURE_OTHER_SHA="$(sed -n 's/^[[:space:]]*sha256 "\([^"]*\)".*/\1/p' "$WORK/fixture-pinned.rb" | sed -n 2p)"
 if [ -z "$FIXTURE_OTHER_SHA" ] || [ "$FIXTURE_OTHER_SHA" = "$FIXTURE_FIRST_SHA" ]; then
   echo "HARNESS FAILURE: the first two fixture pins are the same value, so swapping" >&2
