@@ -15,6 +15,9 @@ permissions:
   # Needed to dispatch Validate Formula below. A push made with GITHUB_TOKEN
   # does not trigger workflows, so the validation has to be asked for.
   actions: write
+  # The updater verifies each asset's build provenance, which reads rvben/rumdl's
+  # attestations through the API.
+  attestations: read
 
 # Two releases dispatched close together would otherwise race on main.
 concurrency:
@@ -40,6 +43,11 @@ jobs:
           # Via env, not ${{ }} inside the script: this value comes from a
           # dispatch payload and must not be able to become shell.
           VERSION_INPUT: ${{ github.event.client_payload.version || inputs.version }}
+          # The script runs `gh attestation verify`, which needs a token: a
+          # hosted runner has no gh login, and without this the updater aborts
+          # with "please run gh auth login" - a failure that could only ever
+          # appear after a real release, since nothing else runs this step.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           echo "Requested version: $VERSION_INPUT"

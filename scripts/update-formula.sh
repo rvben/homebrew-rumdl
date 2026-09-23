@@ -59,6 +59,27 @@ CURL_OPTS=(
 # would count as a release build.
 SIGNER_WORKFLOW="rvben/rumdl/.github/workflows/release.yml"
 
+# Checked once, before anything is downloaded, because the per-asset failure is
+# indistinguishable from a real provenance failure: an unauthenticated
+# `gh attestation verify` exits 4 telling you to run `gh auth login`, which the
+# loop below would report as "no valid build provenance", pointing at the release
+# instead of at the environment. A hosted runner has no gh login, so the workflow
+# passes GH_TOKEN.
+if [ "${ALLOW_UNATTESTED:-0}" != "1" ]; then
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "error: gh is required to verify each asset's build provenance" >&2
+    echo "       Install the GitHub CLI, or re-run with ALLOW_UNATTESTED=1 to pin" >&2
+    echo "       bytes whose origin has not been checked." >&2
+    exit 1
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    echo "error: gh is not authenticated, so provenance cannot be verified" >&2
+    echo "       Run gh auth login, or set GH_TOKEN. In a workflow, pass" >&2
+    echo "       GH_TOKEN: \${{ github.token }} to the step that runs this." >&2
+    exit 1
+  fi
+fi
+
 url_count="$(grep -c '^[[:space:]]*url "' "$FORMULA")"
 sha_count="$(grep -c '^[[:space:]]*sha256 "' "$FORMULA")"
 if [ "$url_count" != "$sha_count" ]; then
