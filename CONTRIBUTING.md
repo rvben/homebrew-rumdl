@@ -165,16 +165,20 @@ to know:
   `skip-worktree`, which git does not stat and so cannot report as clean. Stash
   them, copy them into your checkout, or run with `DISCARD_TAP_CLONE=1`. That
   hatch resets the clone to its own `HEAD` first, so every file `HEAD` tracks
-  there goes back to `HEAD`'s bytes, and an unfinished merge is cleared with it.
-  An interrupted rebase is not: measured on git 2.50.1, `.git/rebase-merge`
-  survives both the reset and the refresh, and the clone is still rebasing
-  afterwards. Two shapes of that are worth naming, because `git status` reports
-  neither as a modified file: an edit to a path marked `assume-unchanged`, and a
-  path staged as deleted whose own bytes are still standing there, which status
-  calls untracked as well as deleted. A path `HEAD` does not track is not
-  touched: nothing in the script deletes untracked or ignored files any more, so
-  they stay where they are and the run continues past them. Two things the hatch
-  deliberately does not cover, because being stopped is the better outcome: a file
+  there goes back to `HEAD`'s bytes, and an unfinished merge is cleared with it,
+  as are a conflicted cherry-pick and a conflicted revert. A rebase or a bisect
+  is not: measured on git 2.50.1, `.git/rebase-merge`, `.git/rebase-apply` and
+  `BISECT_START` all survive the reset and the refresh alike, so the script
+  stops on those before it touches anything, in either mode, and says which
+  state it found. Finish the operation or abandon it (`git rebase --abort`, `git
+  bisect reset`), then run again. Two shapes of a tracked edit are worth naming,
+  because `git status` reports neither as a modified file: an edit to a path
+  marked `assume-unchanged`, and a path staged as deleted whose own bytes are
+  still standing there, which status calls untracked as well as deleted. A path
+  `HEAD` does not track is not touched: nothing in the script deletes untracked
+  or ignored files any more, so they stay where they are and the run continues
+  past them. Two things the hatch deliberately does not cover, because being
+  stopped is the better outcome: a file
   the clone holds that the new commit starts tracking, which git refuses to
   overwrite, and a path marked `skip-worktree`, whose local bytes the reset
   honours - if the new commit changes that path the refresh aborts, and if it does
@@ -182,8 +186,8 @@ to know:
   validation refuses instead. Move or unmark those yourself. One more shape is
   named for accuracy rather than guarded: a submodule's own working tree is not
   reset with the superproject, so an edit inside one survives. This repository
-  has no submodules, so a clone of it cannot have one without a commit that adds
-  it.
+  declares no submodules, so a clone of it has none unless you add one by hand,
+  and that leaves a tracked path the inventory above already reports.
 - Run it from your own checkout, never from the tap clone. `brew --repository
   rvben/rumdl` is a full clone of this repository, `scripts/` included, so
   running it there is easy to reach by accident, and then the directory being

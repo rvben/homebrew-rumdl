@@ -326,6 +326,47 @@ if brew tap | grep -qx rvben/rumdl; then
     echo "       Inspect the clone, or drop the tap (brew untap rvben/rumdl)." >&2
     exit 1
   fi
+  # An operation left half-finished in that clone is state neither the reset nor the
+  # checkout clears, so the refresh must not run past it. Nothing prevents a
+  # contributor from starting one there: `brew edit rvben/rumdl/rumdl` puts them in
+  # this clone in the first place, and a rebase or a bisect of what they found is an
+  # ordinary next step. Measured on git 2.50.1, seven operations, each one's state
+  # confirmed present before the two steps ran - the first run of that probe set up
+  # no conflict, so four arms left nothing behind and proved nothing:
+  #
+  #   conflicted merge         MERGE_HEAD        cleared by the reset
+  #   conflicted cherry-pick   CHERRY_PICK_HEAD  cleared by the reset
+  #   conflicted revert        REVERT_HEAD       cleared by the reset
+  #   rebase -i stopped        rebase-merge      SURVIVES the reset and the checkout
+  #   conflicted rebase        rebase-merge      SURVIVES both
+  #   rebase --apply stopped   rebase-apply      SURVIVES both
+  #   bisect in progress       BISECT_START      SURVIVES both
+  #
+  # For the three that survive, refreshing moves HEAD out from under the operation and
+  # leaves it pointing at commits the contributor never chose, while
+  # DISCARD_TAP_CLONE=1 prints that HEAD's bytes were restored. The hatch is for
+  # tracked edits; this is not one, so it stops in both modes. git's own --git-path is
+  # what locates these, rather than a hand-built .git path, because the answer differs
+  # in a linked worktree.
+  in_progress=""
+  for op in rebase-merge rebase-apply BISECT_START; do
+    op_path="$(tap_git rev-parse --git-path "$op" 2>/dev/null || true)"
+    if [ -n "$op_path" ] && [ -e "$tap_repo/$op_path" ]; then
+      in_progress="$in_progress $op"
+    fi
+  done
+  if [ -n "$in_progress" ]; then
+    echo "error: the rvben/rumdl tap clone has a git operation in progress" >&2
+    echo "       $tap_repo" >&2
+    echo "       git state left behind:$in_progress" >&2
+    echo "       Refreshing it would move HEAD out from under that operation, and a" >&2
+    echo "       reset does not clear these the way it clears a merge, so" >&2
+    echo "       DISCARD_TAP_CLONE=1 does not cover it either." >&2
+    echo "       Finish it or abandon it (git -C \"$tap_repo\" rebase --abort," >&2
+    echo "       git -C \"$tap_repo\" bisect reset), or drop the tap" >&2
+    echo "       (brew untap rvben/rumdl)." >&2
+    exit 1
+  fi
   if { [ -n "$dirty" ] || [ -n "$hidden" ] || [ "$ahead" != "0" ]; } &&
      [ "${DISCARD_TAP_CLONE:-0}" = "1" ]; then
     # "over", not "discarding": a path HEAD does not track stays where it is now that no
@@ -354,10 +395,13 @@ if brew tap | grep -qx rvben/rumdl; then
     #
     # The last two arms are why the sentence below says "a path HEAD tracks" rather than
     # "everything": a submodule's own working tree is not reset with the superproject, and
-    # a rebase left in progress survives both the reset and the checkout. Neither can
-    # occur in a clone of THIS repository - it has no submodules, and the refresh has no
-    # reason to rebase - so both are stated for the sentence's accuracy rather than
-    # guarded.
+    # a rebase left in progress survives both the reset and the checkout. The rebase is
+    # reachable - a contributor can start one in the clone - and is refused above, before
+    # either mode gets here, together with a bisect and the other rebase backend. The
+    # submodule arm is stated for the sentence's accuracy rather than guarded: this
+    # repository declares no submodules, so a clone of a commit of it has none unless
+    # someone adds one by hand, and that shape is a tracked path the inventory above
+    # already reports as changed.
     echo "    DISCARD_TAP_CLONE=1: proceeding over $(printf '%s' "$dirty" | grep -c . ) changed path(s), $(printf '%s' "$hidden" | grep -c . ) path(s) git was told not to look at, and $ahead local commit(s)"
     echo "    Every file HEAD tracks there goes back to HEAD's bytes - including an edit"
     echo "    git was told not to stat, and a path staged as deleted while HEAD still"

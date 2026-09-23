@@ -1007,6 +1007,45 @@ setup_clone_staged_deletion_private_bytes() {
 # validated while reporting on ours. Only the byte check stands there.
 setup_clone_skip_worktree_for_discard() { setup_clone_skip_worktree_formula "$1"; }
 
+# A rebase left in progress in the tap clone, with a clean working tree and no commit
+# the checkout lacks - so every list the inventory builds is empty and the only reason
+# to stop is the operation itself. That is the point: on the previous version of the
+# script this fixture refreshed successfully and exited 0, leaving the contributor's
+# rebase pointing at commits they never chose.
+#
+# `rebase -i` onto HEAD~1 with the todo's first `pick` turned into `break` stops before
+# applying anything, so HEAD is detached at the parent, `status` prints nothing, and
+# .git/rebase-merge is on disk. Measured across seven operations, each one's state
+# confirmed present first: a conflicted merge, cherry-pick and revert are all cleared by
+# the hatch's reset, while both rebase backends and a bisect survive the reset and the
+# refresh alike.
+#
+# The sequence editor is a script file rather than an inline command because git runs
+# GIT_SEQUENCE_EDITOR through a shell, and `sed -i` is spelled differently on BSD and
+# GNU - this suite runs on both.
+setup_clone_rebase_in_progress() {
+  setup_tap_clone "$1" || return 1
+  scratch_git -C "$1/tap-clone" fetch -q "$1" HEAD || return 1
+  scratch_git -C "$1/tap-clone" reset -q --hard FETCH_HEAD || return 1
+  # $1 inside the single quotes is the sequence editor's OWN argument, the todo file
+  # git hands it, not this function's case directory. Unexpanded on purpose.
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/bin/sh' \
+    'sed "1s/^pick/break/" "$1" > "$1.todo.new" && mv "$1.todo.new" "$1"' \
+    > "$1/seq-editor" || return 1
+  chmod +x "$1/seq-editor" || return 1
+  GIT_SEQUENCE_EDITOR="$1/seq-editor" \
+    scratch_git -C "$1/tap-clone" rebase -i HEAD~1 >/dev/null 2>&1
+  # Asserted, not assumed. A rebase that completed, or never started, leaves a fixture
+  # that tests the refusal for no reason and would pass on a script without the guard.
+  if [ ! -d "$1/tap-clone/.git/rebase-merge" ]; then
+    echo "harness: no rebase was left in progress in the clone" >&2
+    return 1
+  fi
+  # Re-recorded: HEAD is the detached parent now, and the refusal is checked against it.
+  scratch_git -C "$1/tap-clone" rev-parse HEAD > "$1/clone-head.txt" || return 1
+}
+
 # This checkout IS the tap clone, which is what `cd "$(brew --repository rvben/rumdl)"`
 # leaves someone in. The formula is edited and uncommitted, because that is the state the
 # collapse costs something in: the pin check reads the edit, the reset puts HEAD's bytes
@@ -1776,6 +1815,23 @@ assert_hatch_refused_over_kept_bytes() { # <casedir>
   return "$bad"
 }
 
+# The refusal over an operation the clone left half-finished. Three claims, because the
+# refusal message alone would also pass on a run that refreshed the clone first and
+# complained afterwards: the rebase is still there to be finished, HEAD has not moved out
+# from under it, and no brew check ran.
+assert_clone_rebase_still_in_progress() { # <casedir>
+  local bad=0
+  if [ ! -d "$1/tap-clone/.git/rebase-merge" ]; then
+    echo "the clone's rebase state is gone - the run either finished or discarded an"
+    echo "operation the contributor left half-done, and a reset does not clear this one:"
+    echo "it was still there after the reset and the refresh when that was measured"
+    bad=1
+  fi
+  assert_clone_head_unmoved "$1" || bad=1
+  assert_refused_before_brew_checks "$1" || bad=1
+  return "$bad"
+}
+
 # The checkout that is also the tap clone. The refusal has to arrive with the contributor's
 # uncommitted formula still where it was: this guard exists because the run would otherwise
 # reset that file and report pins for the bytes it replaced.
@@ -2540,6 +2596,19 @@ CASE_ENV=case_env_discard_tap_clone
 CASE_ASSERT=assert_hatch_refused_over_kept_bytes
 case_run "DISCARD_TAP_CLONE=1 cannot clear skip-worktree, and the run stops" 1 \
   "is not the formula in" validate-formula.sh < "$FORMULA"
+
+# And the other thing the hatch cannot clear, which is not a file at all. `brew edit
+# rvben/rumdl/rumdl` leaves a contributor in this clone, so rebasing or bisecting what
+# they find there is an ordinary next step - and the reset the hatch performs clears a
+# merge, a cherry-pick and a revert but not those. The clone is clean and level here, so
+# nothing else in the script has any reason to stop: this case passes only on a version
+# that looks for the operation.
+CASE_SETUP=setup_clone_rebase_in_progress
+CASE_STUBS=stubs_validator
+CASE_ENV=case_env_discard_tap_clone
+CASE_ASSERT=assert_clone_rebase_still_in_progress
+case_run "DISCARD_TAP_CLONE=1 does not cover a rebase left in progress" 1 \
+  "git operation in progress" validate-formula.sh < "$FORMULA"
 
 # The script run from inside the tap clone, which is one directory doing both jobs. The tap
 # clone is a full clone of this repository, scripts included, so it is a reasonable thing to
