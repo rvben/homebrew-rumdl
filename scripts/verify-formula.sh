@@ -308,7 +308,22 @@ trap 'rm -rf "$tmp"' EXIT
 echo "Verifying $FORMULA at version $VERSION ($pair_count platforms)"
 echo
 
+# Four checks fail in this loop and they call for three different actions, so
+# what failed is recorded per asset rather than as one flag. Printing the same
+# "regenerate the pins" line for all of them is worse than printing none: a url
+# that timed out says nothing about its pin, and an asset whose archive cannot
+# install is wrong at the release, so re-pinning writes a fresh hash for the same
+# unusable bytes.
 failed=0
+kinds=""
+note_failure() { # note_failure <kind>
+  failed=$((failed + 1))
+  case " $kinds " in
+    *" $1 "*) ;;
+    *) kinds="$kinds $1" ;;
+  esac
+}
+
 n=0
 while IFS="$(printf '\t')" read -r url want ctx; do
   n=$((n + 1))
@@ -317,14 +332,14 @@ while IFS="$(printf '\t')" read -r url want ctx; do
   if ! printf '%s' "$want" | grep -Eq '^[0-9a-f]{64}$'; then
     echo "FAIL  $asset"
     echo "      pinned sha256 is not 64 hex characters: '$want'"
-    failed=1
+    note_failure format
     continue
   fi
 
   if ! curl "${CURL_OPTS[@]}" -o "$tmp/asset.$n" "$url"; then
     echo "FAIL  $asset"
     echo "      could not download $url"
-    failed=1
+    note_failure download
     continue
   fi
 
@@ -360,14 +375,14 @@ while IFS="$(printf '\t')" read -r url want ctx; do
         echo "      architecture the $ctx branch needs"
         echo "      expected:   $want_file"
         echo "      file says:  $got_file"
-        failed=1
+        note_failure asset
       fi
     else
       echo "FAIL  $asset"
       echo "      hash matches, but the archive has no installable 'rumdl' binary"
       echo "      contents:   $(tar tzf "$tmp/asset.$n" 2>/dev/null | head -5 | tr '\n' ' ')"
       echo "      def install does bin.install \"rumdl\", so this cannot install"
-      failed=1
+      note_failure asset
     fi
     rm -rf "$tmp/x.$n"
   else
@@ -375,7 +390,7 @@ while IFS="$(printf '\t')" read -r url want ctx; do
     echo "      pinned:     $want"
     echo "      downloaded: $got"
     echo "      url:        $url"
-    failed=1
+    note_failure mismatch
   fi
   rm -f "$tmp/asset.$n"
 done <<EOF
@@ -384,8 +399,23 @@ EOF
 
 echo
 if [ "$failed" -ne 0 ]; then
-  echo "FAILED: at least one pinned sha256 is not the hash of the artifact its url fetches."
-  echo "Run scripts/update-formula.sh $VERSION to regenerate the pins."
+  echo "FAILED: $failed of $pair_count platforms did not verify."
+  case " $kinds " in *" download "*)
+    echo "  - An asset could not be downloaded. That says nothing about its pin:"
+    echo "    check the release still carries that asset, then re-run."
+    ;;
+  esac
+  case " $kinds " in *" asset "*)
+    echo "  - An asset's hash matched, but what it contains cannot be installed on"
+    echo "    the platform it is pinned for. The release upload is wrong, so"
+    echo "    re-pinning would pin the same unusable archive under a fresh hash."
+    ;;
+  esac
+  case " $kinds " in *" format "*|*" mismatch "*)
+    echo "  - A pin is not the hash of the artifact its url fetches."
+    echo "    Run scripts/update-formula.sh $VERSION to regenerate the pins."
+    ;;
+  esac
   exit 1
 fi
 echo "All $pair_count pins match the artifacts their urls fetch, at version $VERSION."

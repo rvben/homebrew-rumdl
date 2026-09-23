@@ -223,6 +223,52 @@ assert_only_the_pin_format_failed() { # <casedir>
   fi
 }
 
+# The summary the verifier ends a failed run with is the only part of its output a
+# maintainer acts on, so what it tells them to do has to fit what actually failed.
+# These two assertions are complements: one requires the re-pin instruction, the
+# other requires its absence, and a summary that printed it for every failure -
+# which is what it did, including for a url that timed out - fails the second one.
+#
+# Both also require three assets to have verified and exactly one to have failed,
+# for the reason assert_only_the_pin_format_failed gives: without it a run that
+# never downloaded anything satisfies a check for the absence of a message.
+assert_one_failure_in_the_loop() { # <casedir>
+  local oks fails
+  oks="$(grep -c '^ok    ' "$1/out.txt")"
+  fails="$(grep -c '^FAIL  ' "$1/out.txt")"
+  if [ "$oks" != 3 ] || [ "$fails" != 1 ]; then
+    echo "expected three assets to verify and one to fail, got $oks ok and $fails FAIL,"
+    echo "so this case does not show which failure produced the summary it asserts:"
+    sed 's/^/  /' "$1/out.txt" | head -12
+    return 1
+  fi
+}
+
+assert_advises_repin() { # <casedir>
+  assert_one_failure_in_the_loop "$1" || return 1
+  if ! grep -qF 'Run scripts/update-formula.sh' "$1/out.txt"; then
+    echo "the summary did not say to regenerate the pins, which is the action a pin"
+    echo "that is not the hash of its own bytes calls for:"
+    sed 's/^/  /' "$1/out.txt" | tail -8
+    return 1
+  fi
+}
+
+assert_no_repin_advice() { # <casedir>
+  assert_one_failure_in_the_loop "$1" || return 1
+  local pat
+  for pat in 'Run scripts/update-formula.sh' 'A pin is not the hash of the artifact'; do
+    if grep -qF -- "$pat" "$1/out.txt"; then
+      echo "the summary printed:"
+      echo "  $pat"
+      echo "but the pins are not what failed here, so that sends the maintainer to"
+      echo "rewrite a correct pin while what actually failed goes unlooked-at:"
+      sed 's/^/  /' "$1/out.txt" | tail -10
+      return 1
+    fi
+  done
+}
+
 # Two cases build their mutation with python3, and a missing interpreter is the
 # one failure `assert_mutated` cannot see: the heredoc writes an EMPTY file, which
 # differs from the formula, so the mutation looks real. verify-formula.sh then
@@ -326,6 +372,21 @@ build_fixture_assets() { # build_fixture_assets <outdir> <build-name>
 
 build_fixture_assets "$WORK/assets" first ||
   { echo "HARNESS FAILURE: could not build the fixture assets" >&2; exit 1; }
+# The same four assets with one archive carrying no installable binary, which is a
+# release upload built or packaged wrong rather than a pin gone stale. The target
+# is one of the two the verifier cannot execute, because that is the case the
+# archive listing exists for.
+NOBINARY_TARGET=x86_64-unknown-linux-musl
+build_fixture_assets "$WORK/assets-nobinary" first || exit 1
+( d="$WORK/build-nobinary" && mkdir -p "$d" &&
+  printf 'not a binary\n' > "$d/NOTES" &&
+  cd "$d" && COPYFILE_DISABLE=1 tar czf "$WORK/assets-nobinary/$NOBINARY_TARGET.tar.gz" NOTES ) ||
+  { echo "HARNESS FAILURE: could not build the binary-less fixture asset" >&2; exit 1; }
+if tar tzf "$WORK/assets-nobinary/$NOBINARY_TARGET.tar.gz" | grep -qx rumdl; then
+  echo "HARNESS FAILURE: the binary-less fixture still contains a rumdl entry, so" >&2
+  echo "                 the case built on it would verify clean." >&2
+  exit 1
+fi
 build_fixture_assets "$WORK/assets-replaced" second ||
   { echo "HARNESS FAILURE: could not build the replaced fixture assets" >&2; exit 1; }
 
@@ -361,6 +422,11 @@ write_curl_stub() { # write_curl_stub <stubdir> <assetdir> [switch_after] [asset
   printf '%s\n' "$2" > "$1/curl.assets"
   printf '%s\n' "${4:-$2}" > "$1/curl.assets-after"
   printf '%s\n' "${3:-0}" > "$1/curl.switch-after"
+  # One target a case can make unreachable, written empty here so the default stub
+  # serves everything. A whole run with no network reaches the verifier's summary
+  # through a different path from one asset timing out, and the summary is supposed
+  # to tell those apart from a wrong pin.
+  : > "$1/curl.unreachable"
   cat > "$1/curl" <<'STUB'
 #!/bin/sh
 out=""; url=""
@@ -373,6 +439,13 @@ done
 [ -n "$out" ] && [ -n "$url" ] || { echo "stub curl: no -o or no url in: $*" >&2; exit 2; }
 target="$(printf '%s' "$url" | sed -e 's|.*/rumdl-v[0-9][0-9.]*-||' -e 's|\.tar\.gz$||')"
 here="$(dirname "$0")"
+# curl's own wording and exit code for a connection that never answered, which is
+# what the runner saw when github.com stopped answering one job mid-run.
+if [ -n "$(cat "$here/curl.unreachable" 2>/dev/null)" ] &&
+   [ "$target" = "$(cat "$here/curl.unreachable")" ]; then
+  echo "curl: (28) Connection timed out after 20002 milliseconds" >&2
+  exit 28
+fi
 # The version in the url just served, for the gh stub beside this one: the
 # provenance call that follows a download is about those bytes, so the tag it
 # asks about has to be the tag whose url produced them.
@@ -597,6 +670,12 @@ stubs_replaced_midway() { write_curl_stub "$1" "$WORK/assets" 4 "$WORK/assets-re
 # For the verifier rather than the updater: downloads succeed and `file` answers,
 # and there is no gh stub because verify-formula.sh checks no attestations.
 stubs_verifier() { write_curl_stub "$1" "$WORK/assets"; write_file_stub "$1"; }
+# One url the network never answers for, the rest served normally.
+stubs_verifier_one_unreachable() { write_curl_stub "$1" "$WORK/assets"
+  printf '%s\n' "$UNREACHABLE_TARGET" > "$1/curl.unreachable"; write_file_stub "$1"; }
+# And one url whose archive holds no binary to install.
+stubs_verifier_nobinary() { write_curl_stub "$1" "$WORK/assets-nobinary"
+  write_file_stub "$1"; }
 
 assert_formula_untouched() { # <casedir>
   if ! cmp -s "$1/Formula/rumdl.rb" "$1/original.rb"; then
@@ -667,11 +746,11 @@ assert_repinned_to_cur()   { assert_pins_match_fixtures "$1" "$WORK/assets" "$CU
 # checks, which refuse before the first download - but the pin-format check runs
 # inside the download loop, and deleting the flag it sets left its case passing on
 # a failure that came from curl.
-fixture_pinned_formula() { # fixture_pinned_formula <outfile>
-  local t
+fixture_pinned_formula() { # fixture_pinned_formula <outfile> [assetdir]
+  local t dir="${2:-$WORK/assets}"
   : > "$WORK/fixture-pins.tsv" || return 1
   for t in $TARGETS; do
-    printf '%s\t%s\n' "$t" "$(sha256_of_file "$WORK/assets/$t.tar.gz")" >> "$WORK/fixture-pins.tsv"
+    printf '%s\t%s\n' "$t" "$(sha256_of_file "$dir/$t.tar.gz")" >> "$WORK/fixture-pins.tsv"
   done
   pin_to_fixtures "$FORMULA" "$1" "$WORK/fixture-pins.tsv"
 }
@@ -2562,6 +2641,57 @@ CASE_ASSERT=assert_only_the_pin_format_failed
 case_run "a hexadecimal pin that is not 64 characters" 1 \
   "pinned sha256 is not 64 hex characters" \
   verify-formula.sh < "$WORK/pin-short.rb"
+
+# The three failures the download loop can end in besides a malformed pin. They
+# exist as separate cases because they call for three different actions, and the
+# summary used to name only one of them for all four: a `pins` job that failed
+# because github.com stopped answering told the maintainer to regenerate pins that
+# were correct, which is a live formula edited for no reason.
+#
+# A wrong hash, first, as the positive control for the re-pin instruction: the pin
+# is another target's fixture hash, so it is a well-formed pin of the wrong bytes
+# and the loop reaches the comparison rather than the format check.
+FIXTURE_OTHER_SHA="$(sed -n 's/^[[:space:]]*sha256 "\([^"]*\)".*/\1/p' "$WORK/fixture-pinned.rb" | sed -n 2p)"
+if [ -z "$FIXTURE_OTHER_SHA" ] || [ "$FIXTURE_OTHER_SHA" = "$FIXTURE_FIRST_SHA" ]; then
+  echo "HARNESS FAILURE: the first two fixture pins are the same value, so swapping" >&2
+  echo "                 one for the other leaves the formula verifying clean." >&2
+  exit 1
+fi
+bad_pin "$FIXTURE_OTHER_SHA" "$WORK/pin-crossed.rb"
+
+CASE_STUBS=stubs_verifier
+CASE_ASSERT=assert_advises_repin
+case_run "a well-formed pin of another asset's bytes" 1 \
+  "downloaded: " \
+  verify-formula.sh < "$WORK/pin-crossed.rb"
+
+# An asset that never arrives. The pin is untouched and unknowable, so the summary
+# must not claim anything about it - the failure is the network or a missing
+# release asset.
+UNREACHABLE_TARGET=x86_64-apple-darwin
+CASE_STUBS=stubs_verifier_one_unreachable
+CASE_ASSERT=assert_no_repin_advice
+case_run "an asset that cannot be downloaded is not reported as a wrong pin" 1 \
+  "could not be downloaded" \
+  verify-formula.sh < "$WORK/fixture-pinned.rb"
+
+# And an asset whose bytes are exactly what was pinned, and cannot install. The
+# pins are right, the release upload is wrong, so re-pinning would write a fresh
+# hash for the same unusable archive.
+fixture_pinned_formula "$WORK/nobinary-pinned.rb" "$WORK/assets-nobinary" || {
+  echo "HARNESS FAILURE: could not pin a formula to the binary-less fixture set." >&2
+  exit 1
+}
+if cmp -s "$WORK/nobinary-pinned.rb" "$WORK/fixture-pinned.rb"; then
+  echo "HARNESS FAILURE: the binary-less formula is identical to the good one, so its" >&2
+  echo "                 case would test a clean verification." >&2
+  exit 1
+fi
+CASE_STUBS=stubs_verifier_nobinary
+CASE_ASSERT=assert_no_repin_advice
+case_run "an asset pinned correctly and holding no binary is not reported as a wrong pin" 1 \
+  "cannot be installed on" \
+  verify-formula.sh < "$WORK/nobinary-pinned.rb"
 
 # 10-12. The updater's version guard. It reaches curl, a url and the formula
 # text, and the value arrives from a repository_dispatch payload. Run with
