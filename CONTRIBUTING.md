@@ -70,6 +70,18 @@ seconds. It needs `python3` for two of its mutations, and says so up front if it
 is missing, because those two cases would otherwise hand the guard an empty file
 and report the guard as broken.
 
+It also runs `update-formula.sh` to completion, which is the only way to reach the
+half of it that decides what gets pinned: the provenance check, the re-pin
+comparison, the hash write-back, and the restore when verification fails. Those
+cases stub `curl` with four locally built tarballs, one per target, and assert the
+result directly - every `sha256` in the written formula is the hash of the archive
+the `url` above it fetched. Four distinct fixtures rather than one shared payload,
+because a script that wrote the first hash into all four pins would be
+indistinguishable from a correct one otherwise. `gh` and `file` are stubbed
+alongside it: what remains untestable locally is whether rumdl's actually
+published assets match the committed pins, which is `verify-formula.sh`'s job and
+runs next in the same CI job.
+
 ```bash
 ./scripts/test-guards.sh
 ```

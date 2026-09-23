@@ -11,17 +11,23 @@
 # guard to reject it *with the message belonging to the check under test*, so a
 # mutation caught by the wrong check is a failure rather than a pass.
 #
-# Two-sided, deliberately. Case 1 requires the unmodified formula to clear every
-# structural check and reach the download stage, so "reject everything" cannot
-# pass this suite.
+# Two-sided, deliberately. Two cases require a correct run to succeed: case 1 that
+# the unmodified formula clears every structural check and reaches the download
+# stage, and case 13 that a full update pins each url to the bytes that url
+# fetched. Without them, a script that rejected everything would pass this suite.
 #
-# Hermetic and offline: each case runs the real script against a scratch copy of
-# the repository, and `curl` is stubbed to fail immediately, so nothing here
-# touches the network, Homebrew, or the working tree. That bounds what this suite
-# can prove to the structural invariants - the download half (does each pin match
-# its artifact, does each archive hold an installable binary of the right
-# architecture) is checked against the real published assets by every run of
-# verify-formula.sh itself, which is what the `pins` CI job does.
+# Hermetic and offline. Each case runs the real script against a scratch copy of
+# the repository, so nothing here touches the network, Homebrew, or the working
+# tree. By default `curl` is stubbed to fail immediately, which is all the
+# structural cases need. The cases that run update-formula.sh to completion get
+# per-case stubs instead: a `curl` serving locally built tarballs - one per target,
+# four distinct ones, so a mispaired pin is visible - a `gh` that does or does not
+# attest, and a `file` that answers for the fixture binaries, which are shell
+# scripts rather than Mach-O and ELF.
+#
+# What that leaves to CI: whether rumdl's actually published assets match the pins
+# in the committed formula. No local fixture can answer that, and it is the whole
+# job of verify-formula.sh, which the `pins` job runs immediately after this.
 
 set -uo pipefail
 
@@ -96,6 +102,211 @@ printf '#!/bin/sh\nexit 6\n' > "$WORK/stub/curl"
 chmod +x "$WORK/stub/curl"
 export PATH="$WORK/stub:$PATH"
 
+CASE_STUBS=""
+CASE_ASSERT=""
+
+# ---------------------------------------------------------------------------
+# Fixture release assets, for the cases that run update-formula.sh to completion.
+#
+# Everything above stops at a structural check, so a curl that always fails is
+# enough. The updater's remaining half - the provenance loop, the re-pin
+# comparison, the hash write-back, and the restore when verification fails - only
+# runs once downloads succeed, and those are the parts that decide what gets
+# pinned. Reaching them needs a curl that hands back plausible assets.
+#
+# Real gzip tarballs holding a real executable, because verify-formula.sh unpacks
+# each asset and requires an installable `rumdl` inside, and four *different* ones
+# because the invariant under test is that each pin is the hash of the archive its
+# own url fetches. A single shared payload would read identically whether the
+# write-back paired them correctly or wrote one hash four times over.
+# ---------------------------------------------------------------------------
+
+sha256_of_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+TARGETS="aarch64-apple-darwin aarch64-unknown-linux-musl x86_64-apple-darwin x86_64-unknown-linux-musl"
+
+build_fixture_assets() { # build_fixture_assets <outdir> <build-name>
+  local t d
+  mkdir -p "$1" || return 1
+  for t in $TARGETS; do
+    d="$WORK/build-$2/$t"
+    mkdir -p "$d" || return 1
+    # The target is named inside the binary so the `file` stub below can answer
+    # for it, and the build name is what makes the second set of assets different
+    # bytes from the first.
+    printf '#!/bin/sh\n# fixture binary for %s\n# fixture build %s\necho "rumdl fixture"\n' \
+      "$t" "$2" > "$d/rumdl" || return 1
+    chmod +x "$d/rumdl" || return 1
+    # COPYFILE_DISABLE because BSD tar otherwise adds ._rumdl AppleDouble members,
+    # and verify-formula.sh matches the archive's entries exactly.
+    ( cd "$d" && COPYFILE_DISABLE=1 tar czf "$1/$t.tar.gz" rumdl ) || return 1
+  done
+}
+
+build_fixture_assets "$WORK/assets" first ||
+  { echo "HARNESS FAILURE: could not build the fixture assets" >&2; exit 1; }
+build_fixture_assets "$WORK/assets-replaced" second ||
+  { echo "HARNESS FAILURE: could not build the replaced fixture assets" >&2; exit 1; }
+
+# Both controls on the fixtures themselves, because either failure would make a
+# case pass while testing nothing. Four identical assets cannot show a mispaired
+# pin; a replacement set identical to the original cannot show a mid-run asset
+# swap, and verification would simply succeed.
+distinct="$(for t in $TARGETS; do sha256_of_file "$WORK/assets/$t.tar.gz"; done | sort -u | wc -l | tr -d ' ')"
+if [ "$distinct" != "4" ]; then
+  echo "HARNESS FAILURE: the four fixture assets have $distinct distinct hashes, not 4." >&2
+  echo "                 A mispaired pin would be invisible to every case below." >&2
+  exit 1
+fi
+for t in $TARGETS; do
+  if cmp -s "$WORK/assets/$t.tar.gz" "$WORK/assets-replaced/$t.tar.gz"; then
+    echo "HARNESS FAILURE: the replaced fixture for $t is byte-identical to the original." >&2
+    echo "                 The asset-replacement cases would test nothing." >&2
+    exit 1
+  fi
+done
+
+# A curl that succeeds, serving each url the fixture asset for the target named in
+# that url's filename. Both the updater's download loop and the verification it
+# runs afterwards fetch through this, so what gets pinned and what gets checked are
+# the same bytes - unless a case asks for the switch, which serves the second set
+# from call <switch_after> + 1 on. That is a release asset replaced in the window
+# between pinning and verifying.
+write_curl_stub() { # write_curl_stub <stubdir> <assetdir> [switch_after] [assetdir2]
+  cat > "$1/curl" <<STUB
+#!/bin/sh
+out=""; url=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) out="\$2"; shift 2 ;;
+    *)  url="\$1"; shift ;;
+  esac
+done
+[ -n "\$out" ] && [ -n "\$url" ] || { echo "stub curl: no -o or no url in: \$*" >&2; exit 2; }
+target="\$(printf '%s' "\$url" | sed -e 's|.*/rumdl-v[0-9][0-9.]*-||' -e 's|\\.tar\\.gz\$||')"
+count="\$(dirname "\$0")/curl.count"
+n=\$(( \$(cat "\$count" 2>/dev/null || echo 0) + 1 ))
+printf '%s' "\$n" > "\$count"
+dir='$2'
+if [ '${3:-0}' != '0' ] && [ "\$n" -gt '${3:-0}' ]; then dir='${4:-$2}'; fi
+[ -f "\$dir/\$target.tar.gz" ] || { echo "stub curl: no fixture asset for target '\$target'" >&2; exit 22; }
+cat "\$dir/\$target.tar.gz" > "\$out"
+STUB
+  chmod +x "$1/curl"
+}
+
+write_gh_stub() { # write_gh_stub <stubdir> <attestation-exit>
+  cat > "$1/gh" <<STUB
+#!/bin/sh
+# \`gh auth status\` is checked once up front, and has to succeed here or the run
+# stops on "gh is not authenticated" instead of reaching the provenance check the
+# case is about.
+case "\$1 \$2" in
+  "auth status") exit 0 ;;
+esac
+if [ '$2' = '0' ]; then exit 0; fi
+echo "no attestation matching the signer workflow" >&2
+echo "rvben/rumdl/.github/workflows/release.yml was expected" >&2
+exit 1
+STUB
+  chmod +x "$1/gh"
+}
+
+# Only verify-formula.sh's architecture check calls `file`, and the fixture
+# binaries are shell scripts, so the real file(1) would report "POSIX shell
+# script" and fail that check for a reason that has nothing to do with the updater
+# under test. Each fixture names its target inside; this maps that back to the
+# string verify-formula.sh expects for the branch it sits in, which keeps the
+# check's pairing intact - an asset served into the wrong branch still fails.
+write_file_stub() { # write_file_stub <stubdir>
+  cat > "$1/file" <<'STUB'
+#!/bin/sh
+path=""
+for a in "$@"; do path="$a"; done
+t="$(sed -n 's/^# fixture binary for \(.*\)$/\1/p' "$path" 2>/dev/null | head -1)"
+case "$t" in
+  x86_64-apple-darwin)        echo "Mach-O 64-bit executable x86_64" ;;
+  aarch64-apple-darwin)       echo "Mach-O 64-bit executable arm64" ;;
+  x86_64-unknown-linux-musl)  echo "ELF 64-bit LSB executable, x86-64, statically linked" ;;
+  aarch64-unknown-linux-musl) echo "ELF 64-bit LSB executable, ARM aarch64, statically linked" ;;
+  *) echo "stub file: no fixture target marker in $path" >&2; exit 1 ;;
+esac
+STUB
+  chmod +x "$1/file"
+}
+
+stubs_attested()   { write_curl_stub "$1" "$WORK/assets";   write_gh_stub "$1" 0; write_file_stub "$1"; }
+stubs_unattested() { write_curl_stub "$1" "$WORK/assets";   write_gh_stub "$1" 1; write_file_stub "$1"; }
+# Four downloads to pin, then verification downloads all four again: this serves
+# the second set from the fifth call on.
+stubs_replaced_midway() { write_curl_stub "$1" "$WORK/assets" 4 "$WORK/assets-replaced"
+  write_gh_stub "$1" 0; write_file_stub "$1"; }
+
+assert_formula_untouched() { # <casedir>
+  if ! cmp -s "$1/Formula/rumdl.rb" "$1/original.rb"; then
+    echo "the formula was modified; a refusal has to leave it byte-identical"
+    diff "$1/original.rb" "$1/Formula/rumdl.rb" | head -6
+    return 1
+  fi
+}
+
+# The whole point of the updater, asserted directly: every sha256 in the written
+# formula is the hash of the archive the url directly above it fetches, and that
+# url names the expected version. Pairing by position, because that adjacency is
+# what Homebrew acts on.
+assert_pins_match_fixtures() { # <casedir> <assetdir> <version>
+  local pairs url pin target want bad=0 count=0
+  pairs="$(awk '
+    /^[[:space:]]*url "/ {
+      if (match($0, /"https:[^"]*"/)) u = substr($0, RSTART + 1, RLENGTH - 2)
+      next
+    }
+    /^[[:space:]]*sha256 "/ {
+      match($0, /"[^"]*"/)
+      print u "\t" substr($0, RSTART + 1, RLENGTH - 2)
+    }
+  ' "$1/Formula/rumdl.rb")"
+  while IFS="$(printf '\t')" read -r url pin; do
+    [ -n "$url" ] || continue
+    count=$((count + 1))
+    case "$url" in
+      *"/v$3/rumdl-v$3-"*.tar.gz) ;;
+      *) echo "url does not name v$3 in both its path and its filename: $url"; bad=1; continue ;;
+    esac
+    target="${url##*-v"$3"-}"
+    target="${target%.tar.gz}"
+    if [ ! -f "$2/$target.tar.gz" ]; then
+      echo "no fixture asset exists for target '$target', from url $url"
+      bad=1
+      continue
+    fi
+    want="$(sha256_of_file "$2/$target.tar.gz")"
+    if [ "$pin" != "$want" ]; then
+      echo "a pin is not the hash of the archive its own url fetched"
+      echo "  url:      $url"
+      echo "  pinned:   $pin"
+      echo "  fetched:  $want"
+      bad=1
+    fi
+  done <<PAIRS
+$pairs
+PAIRS
+  if [ "$count" != "4" ]; then
+    echo "expected 4 url/sha256 pairs in the written formula, found $count"
+    bad=1
+  fi
+  return "$bad"
+}
+
+assert_pinned_to_other()   { assert_pins_match_fixtures "$1" "$WORK/assets" "$OTHER_VERSION"; }
+assert_repinned_to_cur()   { assert_pins_match_fixtures "$1" "$WORK/assets" "$CUR_VERSION"; }
+
 pass=0
 fail=0
 
@@ -104,13 +315,22 @@ fail=0
 case_run() {
   local name="$1" want_code="$2" want_text="$3" script="$4"; shift 4
   local dir="$WORK/case-$((pass + fail + 1))"
-  mkdir -p "$dir/Formula" "$dir/scripts"
+  mkdir -p "$dir/Formula" "$dir/scripts" "$dir/stub"
   cat > "$dir/Formula/rumdl.rb"
+  # Kept so a case can assert the formula came out exactly as it went in, which is
+  # what every refusal in update-formula.sh actually promises.
+  cp "$dir/Formula/rumdl.rb" "$dir/original.rb"
   cp scripts/verify-formula.sh scripts/update-formula.sh "$dir/scripts/"
   chmod +x "$dir/scripts"/*.sh
 
+  # A case may install stubs of its own - a curl that succeeds, a gh that does or
+  # does not attest - ahead of the deliberately failing defaults.
+  if [ -n "${CASE_STUBS:-}" ]; then
+    "$CASE_STUBS" "$dir/stub"
+  fi
+
   local out code
-  out="$(cd "$dir" && "./scripts/$script" "$@" 2>&1)"
+  out="$(cd "$dir" && PATH="$dir/stub:$PATH" "./scripts/$script" "$@" 2>&1)"
   code=$?
 
   local why=""
@@ -119,6 +339,18 @@ case_run() {
   elif ! printf '%s' "$out" | grep -qF -- "$want_text"; then
     why="expected message not found: $want_text"
   fi
+
+  # An exit code and a message say the guard fired. They do not say what it left
+  # on disk, and for the updater that is the part that matters: a refusal that
+  # rewrote the formula anyway would pass a code-and-message check.
+  if [ -z "$why" ] && [ -n "${CASE_ASSERT:-}" ]; then
+    local detail
+    if ! detail="$("$CASE_ASSERT" "$dir" 2>&1)"; then
+      why="$detail"
+    fi
+  fi
+  CASE_STUBS=""
+  CASE_ASSERT=""
 
   if [ -z "$why" ]; then
     pass=$((pass + 1))
@@ -131,7 +363,7 @@ case_run() {
   fi
 }
 
-echo "Guard tests (offline; curl stubbed to fail)"
+echo "Guard tests (offline; downloads stubbed with local fixture assets)"
 echo
 
 # 1. The positive control. The unmodified formula must clear every structural
@@ -268,6 +500,66 @@ case_run "a version whose first line only looks valid" 2 \
 
 case_run "moving the tap to an older version" 1 \
   "Refusing to move the tap backwards" update-formula.sh 0.1.0 < "$FORMULA"
+
+# 13-17. The updater past its structural checks, where what gets pinned is
+#    actually decided. Downloads succeed from here on, so ALLOW_UNATTESTED must go:
+#    leaving it exported would skip the provenance loop in every case below,
+#    including the one whose whole subject is provenance.
+unset ALLOW_UNATTESTED
+
+# 13. The positive control for the updater, and the counterpart to case 1. A
+#     script that refused every version, or wrote hashes in the wrong order, or
+#     wrote the first hash into all four pins, passes cases 10-12 and 14-17 and
+#     fails only here.
+CASE_STUBS=stubs_attested
+CASE_ASSERT=assert_pinned_to_other
+case_run "a full update pins each url to the bytes that url fetched" 0 \
+  "All 4 pins match the artifacts their urls fetch, at version $OTHER_VERSION" \
+  update-formula.sh "$OTHER_VERSION" < "$FORMULA"
+
+# 14. An asset that downloads cleanly and carries no build provenance. The hash
+#     would be perfectly self-consistent - it is the hash of what the url served -
+#     which is exactly why the attestation is checked before pinning rather than
+#     the hash being taken as sufficient.
+CASE_STUBS=stubs_unattested
+CASE_ASSERT=assert_formula_untouched
+case_run "an asset with no build provenance is refused, not pinned" 1 \
+  "has no valid build provenance from rvben/rumdl" \
+  update-formula.sh "$OTHER_VERSION" < "$FORMULA"
+
+# 15. The v0.2.76 case itself: the formula already names this version, and the
+#     published assets now hash differently. Every pin computed here is genuine
+#     and attested, so nothing else in the chain objects - this guard is the only
+#     thing that turns "the release was re-run" into a decision rather than a
+#     silent change of what users install under a version they already have.
+CASE_STUBS=stubs_attested
+CASE_ASSERT=assert_formula_untouched
+case_run "the same version with changed assets needs ALLOW_REPIN" 1 \
+  "the assets for v$CUR_VERSION have changed since the formula was pinned" \
+  update-formula.sh "$CUR_VERSION" < "$FORMULA"
+
+# 16. And the escape hatch works, so the guard above is a gate rather than a dead
+#     end. Re-pins the version the formula already names to the assets published
+#     now, which is what the operator asked for.
+export ALLOW_REPIN=1
+CASE_STUBS=stubs_attested
+CASE_ASSERT=assert_repinned_to_cur
+case_run "ALLOW_REPIN=1 re-pins the version already named" 0 \
+  "re-pinning v$CUR_VERSION to the assets published now" \
+  update-formula.sh "$CUR_VERSION" < "$FORMULA"
+unset ALLOW_REPIN
+
+# 17. An asset replaced between pinning and verifying: the four downloads that get
+#     pinned succeed, and the four the verification makes return different bytes.
+#     The formula has already been rewritten by then, so the requirement is not
+#     just that the run fails but that it leaves the working tree as it found it.
+#     Without the restore, the next thing to read the formula - including the
+#     commit step in update-formula.yml - takes those unverified pins as current.
+CASE_STUBS=stubs_replaced_midway
+CASE_ASSERT=assert_formula_untouched
+case_run "a verification failure after the write restores the formula" 1 \
+  "was restored to its previous contents" \
+  update-formula.sh "$OTHER_VERSION" < "$FORMULA"
 
 echo
 if [ "$fail" -ne 0 ]; then
