@@ -87,20 +87,25 @@ alongside it: what remains untestable locally is whether rumdl's actually
 published assets match the committed pins, which is `verify-formula.sh`'s job and
 runs next in the same CI job.
 
-It also drives `validate-formula.sh` through the one pair of commands in this
-repository that destroys data: refreshing an existing `rvben/rumdl` tap clone
-with `reset --hard` and `clean -fd`. Those cases stub `brew`, build a real
+It also drives `validate-formula.sh` through the one command in this repository
+that can destroy data: refreshing an existing `rvben/rumdl` tap clone onto the
+commit being validated, with `git checkout --no-overwrite-ignore`, preceded by a
+`git reset --hard` when, and only when, `DISCARD_TAP_CLONE=1` asks for it. Those
+cases stub `brew`, build a real
 repository and a real clone of it for the stub to point at, and assert what is
 left in the clone rather than what the script printed, because a refusal that
 reset the clone anyway would pass a message check.
 
-One of the four names the reason the coverage exists, and is the only one that
-fails against the previous version of the script: against the earlier `rev-list
---count FETCH_HEAD..HEAD || echo 0`, a `rev-list` that could not answer became
-"nothing to lose", and the clone's own commit was destroyed. The other three
-cover refusals older than that fix, so there is no previous version for them to
-fail against; what keeps them honest is removing the check each one owns, after
-which that case, and only that case, fails.
+The first of those cases names the reason the coverage exists: against the earlier
+`rev-list --count FETCH_HEAD..HEAD || echo 0`, a `rev-list` that could not answer
+became "nothing to lose", and the clone's own commit was destroyed. Most of the
+rest cover refusals older than that fix, so there is no previous version for them
+to fail against; what keeps them honest is removing the check each one owns, after
+which that case, and only that case, fails. Two of them work as a pair rather than
+alone, and that is deliberate: clearing a contributor's tracked edit with `checkout
+-f` would satisfy the case that asks the escape hatch to do what it says, while
+destroying the ignored file the other case requires to survive. Neither case is
+sufficient on its own, and the check they guard is only correct because both pass.
 
 ```bash
 ./scripts/test-guards.sh
@@ -151,7 +156,14 @@ to know:
   rvben/rumdl/rumdl` edits exactly that clone, so the refresh stops rather than
   overwrite anything it finds there: uncommitted changes, untracked files, or
   commits your checkout does not have. Stash them, copy them into your checkout,
-  or discard them deliberately with `DISCARD_TAP_CLONE=1`.
+  or run with `DISCARD_TAP_CLONE=1`, which proceeds over tracked edits and local
+  commits in that clone - those go, and an unfinished merge or rebase there is
+  cleared with them. It does not delete untracked files: nothing in the script
+  deletes them any more, so they stay where they are and the run continues past
+  them. Two things it deliberately does not cover, because git refuses them and
+  being stopped is the better outcome: a file the clone holds that the new commit
+  starts tracking, and a path marked `assume-unchanged` or `skip-worktree` that
+  the new commit changes. Move or unmark those yourself.
 
 ## Continuous integration
 

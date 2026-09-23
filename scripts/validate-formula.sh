@@ -203,7 +203,31 @@ if brew tap | grep -qx rvben/rumdl; then
   # core.hooksPath is emptied for the reason the refresh further down gives. Neither
   # value can name something that runs: /dev/null is not a directory, and `false` is
   # git's own spelling for "no fsmonitor".
-  tap_git() { git -C "$tap_repo" -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
+  #
+  # --work-tree pins where the refresh writes. core.worktree in that clone sends git
+  # at another directory entirely, and these repos reach that state for real: the key
+  # goes stale when a worktree is deleted under an interrupted operation, which has
+  # happened twice. Measured with it set, two outcomes and both wrong. Where the
+  # redirected directory looks clean against the clone's HEAD, the inventory reports
+  # nothing, the checkout exits 0, and it writes the fetched commit INTO that
+  # directory - files nobody nominated - while the tap path keeps the old formula that
+  # every brew check below then reads. Where it does not look clean, the inventory
+  # reports work that is not in the clone at all and the run refuses over someone
+  # else's files. With --work-tree the same fixture refreshed the clone, left the other
+  # directory byte-identical, and reported a clean inventory.
+  #
+  # core.autocrlf=true rewrites every file it checks out, and one of them is the
+  # formula brew audits. No .gitattributes and no adversary needed: it is one setting a
+  # contributor may have set once for Windows work. Measured: 3 CRs in
+  # Formula/rumdl.rb after the refresh, none with these two overrides.
+  #
+  # What this wrapper cannot reach is recorded with the check that covers it, after the
+  # refresh: a filter driver the FETCHED tree selects by name, and brew's own git.
+  tap_git() {
+    git -C "$tap_repo" --work-tree="$tap_repo" \
+      -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+      -c core.autocrlf=false -c core.eol=lf "$@"
+  }
   echo "==> Refreshing the existing rvben/rumdl tap clone from $TAP_DIR"
   tap_git fetch --quiet "$TAP_DIR" HEAD
 
@@ -214,8 +238,10 @@ if brew tap | grep -qx rvben/rumdl; then
   # `status --porcelain` is a complete inventory only while nothing has told git to
   # stop looking, and two things do, both by printing nothing rather than failing.
   #
-  # status.showUntrackedFiles=no hides every untracked file - which is exactly what
-  # `clean -fd` deletes - and it can come from the clone's own config, from a global
+  # status.showUntrackedFiles=no hides every untracked file, which is the half of this
+  # inventory a contributor's own experiment most often lives in - a formula variant
+  # saved beside the real one is untracked, not modified - and it can come from the
+  # clone's own config, from a global
   # config, or from the environment. An --untracked-files on the command line beats
   # all three, so the inventory asks for the listing it needs instead of accepting
   # the one configuration chose.
@@ -251,8 +277,8 @@ if brew tap | grep -qx rvben/rumdl; then
   # "nothing is hidden" stays an exit status of 0 under set -e.
   hidden="$(printf '%s\n' "$index_flags" |
     awk '$1 ~ /^([a-z]|S)$/ { $1 = ""; sub(/^ /, ""); print }')"
-  # Ignored files are absent from both lists above, and `clean -fd` without -x leaves
-  # them alone, so most of them are none of this script's business. One shape is:
+  # Ignored files are absent from both lists above, and nothing here deletes them, so
+  # most of them are none of this script's business. One shape is:
   # a path the FETCHED commit tracks, which this clone holds as a locally created
   # ignored file. That collision is not detected here at all, deliberately - see the
   # refresh below, which asks git to detect it.
@@ -279,6 +305,35 @@ if brew tap | grep -qx rvben/rumdl; then
     # since a contributor who reads it as "they are gone" has lost nothing.
     echo "    DISCARD_TAP_CLONE=1: proceeding over $(printf '%s' "$dirty" | grep -c . ) changed path(s), $(printf '%s' "$hidden" | grep -c . ) path(s) git was told not to look at, and $ahead local commit(s)"
     echo "    Tracked edits and local commits there go; untracked files are left in place."
+    # And this is what makes that sentence true. The refresh below is a NON-forced
+    # checkout, which refuses to overwrite a modified tracked file - so without this
+    # reset the hatch announced it was proceeding and then died on git's refusal, for
+    # exactly the shape it exists for: `brew edit rvben/rumdl/rumdl` modifies
+    # Formula/rumdl.rb, and the commit being validated always changes that file too.
+    # Measured on git 2.50.1: a local commit or an edit to any OTHER file completed
+    # fine, which is why the hatch looked like it worked.
+    #
+    # `reset --hard HEAD`, not `checkout -f`, and the difference is the whole point.
+    # Both clear tracked edits and an unmerged index; -f additionally defeats
+    # --no-overwrite-ignore, overwriting the ignored local file the refresh below
+    # refuses over. Measured on the same fixture, all four outcomes: after this reset
+    # the collision still aborts with the local bytes intact, while -f exits 0 and
+    # replaces them with the fetched commit's copy. The reset only touches paths in
+    # HEAD, so ignored and untracked files are not its business.
+    #
+    # What it still does not cover, because reset honours the flags: a path marked
+    # assume-unchanged or skip-worktree keeps its local bytes, and if the fetched
+    # commit changes that path the checkout below aborts. Nothing is lost there, and
+    # the hatch's counter above reports those paths separately rather than promising
+    # they go.
+    if ! discard_out="$(tap_git reset --hard --quiet HEAD 2>&1)"; then
+      echo "error: could not discard the local state of the rvben/rumdl tap clone" >&2
+      echo "       $tap_repo" >&2
+      printf '%s\n' "$discard_out" | sed 's/^/         /' >&2
+      echo "       Nothing below this ran. Inspect that clone, or drop the tap" >&2
+      echo "       (brew untap rvben/rumdl)." >&2
+      exit 1
+    fi
   elif [ -n "$dirty" ] || [ -n "$hidden" ] || [ "$ahead" != "0" ]; then
     echo "error: the rvben/rumdl tap clone holds work this would destroy" >&2
     echo "       $tap_repo" >&2
@@ -345,36 +400,49 @@ if brew tap | grep -qx rvben/rumdl; then
   # lands here, and there the sentence about ignored paths is simply false. Measured:
   # `DISCARD_TAP_CLONE=1` on a clone mid-conflict printed it.
   #
-  # Nor does the hatch cover that case, and deliberately not by force: `checkout -f`
-  # clears the unmerged index, but it was measured to defeat `--no-overwrite-ignore`
-  # as well, overwriting the very ignored file this block refuses over. So the
-  # refusal stands for every cause and names what to do for the two known shapes,
-  # rather than clearing one state and leaving rebase, cherry-pick and revert to
-  # print a wrong explanation - hand-enumerating the states is the mistake this
-  # refresh already made once with collisions.
+  # The hatch covers that one - its `reset --hard HEAD` clears an unmerged index, and
+  # the checkout then succeeds (measured: 3 unmerged paths before, 0 after, refresh
+  # exit 0 on the fetched commit) - but only when the hatch was asked for, so this
+  # refusal is still what a mid-conflict clone meets by default.
+  #
+  # What the hatch deliberately does not do is force: `checkout -f` clears the same
+  # unmerged index and was measured to defeat `--no-overwrite-ignore` as well,
+  # overwriting the very ignored file this block refuses over. So the refusal stands
+  # for every cause and the guidance below distinguishes only what git's own message
+  # already distinguishes, rather than asserting a cause: hand-enumerating the states
+  # is the mistake this refresh already made once with collisions.
   if [ "$refresh_code" != "0" ]; then
     echo "error: git refused to refresh the rvben/rumdl tap clone" >&2
     echo "       $tap_repo" >&2
     printf '%s\n' "$refresh_out" | sed 's/^/         /' >&2
-    echo "       Nothing was written: the clone is exactly as it was." >&2
-    echo "       If git named paths there, that clone holds them as ignored or" >&2
-    echo "       untracked files and the fetched commit tracks them. The inventory" >&2
-    echo "       above cannot see those and DISCARD_TAP_CLONE=1 does not cover them," >&2
-    echo "       so move or remove them deliberately." >&2
+    echo "       Your working tree and your commits there are untouched: the fetch" >&2
+    echo "       before this added objects and wrote FETCH_HEAD, and nothing else" >&2
+    echo "       in that clone was written." >&2
+    echo "       If git named paths there, that clone holds local bytes at those" >&2
+    echo "       paths and the commit being validated writes them too: files it" >&2
+    echo "       ignores or does not track, or a path marked assume-unchanged or" >&2
+    echo "       skip-worktree. DISCARD_TAP_CLONE=1 covers none of those, so move" >&2
+    echo "       or remove them deliberately." >&2
     echo "       If it named the index instead, an operation is unfinished in that" >&2
     echo "       clone - finish it, or abort it (git -C \"$tap_repo\" merge --abort)." >&2
     echo "       Either way you can also drop the tap (brew untap rvben/rumdl)." >&2
     exit 1
   fi
-  # No `clean` here, deliberately. It used to follow the refresh, and on a clone the
-  # inventory has just found clean there is nothing for it to delete except the one
-  # thing it must not: a file the clone holds that its OWN .gitignore covers, where the
-  # fetched commit drops that ignore rule without tracking the path. Then the file is
-  # ignored when the inventory looks and untracked when the clean runs, so no list above
-  # holds it, checkout has no collision to refuse - the fetched commit does not track it
-  # - and the clean deletes it. Measured, with the whole inventory empty: a local
-  # `notes.md` was gone at the end of the run, and kept by the identical run with the
-  # clean removed, which also reached the fetched commit with the right formula.
+  # No `clean` here, deliberately. It used to follow the refresh, and what it deleted
+  # was never what it was there for. On a clone the inventory has just found clean, the
+  # one thing left for it to delete is the one thing it must not: a file the clone holds
+  # that its OWN .gitignore covers, where the fetched commit drops that ignore rule
+  # without tracking the path. Then the file is ignored when the inventory looks and
+  # untracked when the clean runs, so no list above holds it, checkout has no collision
+  # to refuse - the fetched commit does not track it - and the clean deletes it.
+  # Measured, with the whole inventory empty: a local `notes.md` was gone at the end of
+  # the run, and kept by the identical run with the clean removed, which also reached
+  # the fetched commit with the right formula.
+  #
+  # "Nothing left to delete" holds for the clean-inventory case only. Past
+  # DISCARD_TAP_CLONE=1 the clean had plenty to delete - every untracked file that hatch
+  # was told to proceed over, and any other path the fetched rules stop ignoring - which
+  # is the second reason it is gone rather than narrowed.
   #
   # What it cost to remove: under DISCARD_TAP_CLONE=1 the untracked files that hatch
   # discards now stay in the working tree rather than being deleted. They are listed
@@ -385,6 +453,58 @@ if brew tap | grep -qx rvben/rumdl; then
 else
   echo "==> Tapping rvben/rumdl from $TAP_DIR"
   brew tap --force rvben/rumdl "$TAP_DIR"
+  tap_repo="$(brew --repository rvben/rumdl)"
+fi
+
+# Whichever path produced that clone, everything below depends on one property, and it
+# is one sentence long: the formula sitting where brew reads it is the formula in the
+# commit this run says it validated. Five review rounds found five different mechanisms
+# that break it - a post-checkout hook, a core.fsmonitor program, core.autocrlf, a
+# smudge filter the fetched .gitattributes selects, core.worktree pointing elsewhere -
+# and each fix closed one and left the next. Enumerating mechanisms is what kept
+# failing, so this compares the bytes themselves. It holds for the mechanism nobody has
+# thought of yet, and for the plainest failure of all: a clone left at the wrong
+# commit, which is what this whole block exists to prevent and was seen happening.
+#
+# `cat-file blob` is the stored object - no smudge filter, no textconv, no eol
+# conversion - so it is the commit's bytes rather than another reading of the same
+# worktree. And the check sits outside the refresh because `brew tap --force` clones
+# with brew's own git, which this script has no way to wrap: a global core.autocrlf
+# reaches that clone, and only the bytes afterwards can say so.
+#
+# The honest limit: this proves what brew READS, not that brew's own git ran nothing
+# of the clone's choosing. Those invocations are brew's, they are not wrapped, and
+# nothing here changes that.
+if [ "$FORMULA_STATE" = unknown ]; then
+  echo "==> Not checking the tap clone's bytes: $TAP_DIR has no HEAD commit, so this"
+  echo "    run has no committed formula to compare against."
+elif ! git -C "$TAP_DIR" cat-file -e HEAD:Formula/rumdl.rb 2>/dev/null; then
+  echo "error: HEAD in $TAP_DIR has no Formula/rumdl.rb" >&2
+  echo "       Every check below reads a clone of that commit, so there is nothing" >&2
+  echo "       for them to validate and no bytes to compare." >&2
+  exit 1
+elif [ ! -f "$tap_repo/Formula/rumdl.rb" ]; then
+  echo "error: the rvben/rumdl tap clone has no Formula/rumdl.rb" >&2
+  echo "       $tap_repo" >&2
+  echo "       The commit being validated tracks it, so something in that clone is" >&2
+  echo "       keeping it out of the working tree - sparse-checkout is the usual" >&2
+  echo "       one. Every brew check below would run against a tap without the" >&2
+  echo "       formula in it." >&2
+  echo "       Re-tap to get a clean clone: brew untap rvben/rumdl, then re-run." >&2
+  exit 1
+elif ! git -C "$TAP_DIR" cat-file blob HEAD:Formula/rumdl.rb |
+     cmp -s - "$tap_repo/Formula/rumdl.rb"; then
+  echo "error: the formula in the rvben/rumdl tap clone is not the formula in $HEAD_SHA" >&2
+  echo "       $tap_repo/Formula/rumdl.rb" >&2
+  echo "       The bytes there differ from the committed formula this run validated," >&2
+  echo "       so brew audit, brew style and brew install below would report on a" >&2
+  echo "       formula nothing has checked, under the name of the one that was." >&2
+  echo "       Something in that clone rewrites files as they are checked out, or it" >&2
+  echo "       is not at the commit it reports. Look for a filter driver or" >&2
+  echo "       line-ending conversion:" >&2
+  echo "         git -C \"$tap_repo\" config --list | grep -E 'filter|autocrlf|eol|worktree'" >&2
+  echo "       Re-tapping gets a clean clone: brew untap rvben/rumdl, then re-run." >&2
+  exit 1
 fi
 
 # Homebrew 7 refuses to load formulae from an untrusted third-party tap. Guarded

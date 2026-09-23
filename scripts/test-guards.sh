@@ -621,11 +621,17 @@ PY
 
 # ---------------------------------------------------------------------------
 # The tap-clone refresh in validate-formula.sh, which is the one place in this
-# repository that destroys data: `git reset --hard` followed by `git clean -qfd`
-# inside the clone `brew edit rvben/rumdl/rumdl` opens, where a contributor's
-# experiment plausibly lives. What permits that pair to run is a check three lines
-# above it, and that check was wrong until today - a failed `rev-list` was coerced
-# to `0`, turning "I could not tell" into "there is nothing to lose".
+# repository that destroys data: it moves the clone `brew edit rvben/rumdl/rumdl`
+# opens, where a contributor's experiment plausibly lives, onto the commit being
+# validated. What permits that to run is the inventory above it, and that inventory
+# was wrong until today - a failed `rev-list` was coerced to `0`, turning "I could
+# not tell" into "there is nothing to lose".
+#
+# The commands have changed under these cases twice, which is why they assert states
+# and not commands: `reset --hard` plus `clean -qfd` became `checkout
+# --no-overwrite-ignore` with no clean at all, and every case below held. Where a
+# comment names one, it is naming the version that produced the defect the case
+# covers.
 #
 # So these cases use real git repositories rather than stubs for the part under
 # test: a committed checkout, a clone of it, and an assertion afterwards about what
@@ -653,6 +659,21 @@ scratch_git() {
       -c core.hooksPath="$WORK/nohooks" -c core.fsmonitor=false \
       -c commit.gpgsign=false \
       -c user.name=guard -c user.email=guard@example.invalid "$@"
+}
+
+# Reading a tap clone's working tree, for the assertions. The same principle as the
+# overrides above, one step further: the harness must not run what a fixture installed,
+# and it must not be SENT where a fixture's config points either. A fixture that sets
+# core.worktree redirects every worktree command in the clone, the assertions' included,
+# so `status --porcelain` there describes the other directory. Measured: it reported
+# ` M Formula/rumdl.rb` and ` D later.txt` - a correct account of the directory that was
+# rightly left alone - and failed a case whose guard had worked.
+#
+# Only the worktree-level reads need this. HEAD comparisons are ref-level, the byte
+# comparisons read files directly, and `ls-files -v` answers from the index.
+clone_git() { # clone_git <casedir> <args...>
+  local d="$1"; shift
+  scratch_git -C "$d/tap-clone" --work-tree="$d/tap-clone" "$@"
 }
 
 setup_tap_clone() { # setup_tap_clone <casedir>
@@ -717,12 +738,13 @@ setup_clone_dirty() {
   cp "$1/tap-clone/Formula/rumdl.rb" "$1/clone-dirty-formula.rb" || return 1
 }
 
-# Dirt that is a file git is not tracking. `clean -fd` is the half of the refresh
-# that deletes these, and CONTRIBUTING.md promises they stop it, but every other
-# case's dirt is a modified tracked file - which `status --porcelain
-# --untracked-files=no` still reports. So a refresh that stopped looking at
-# untracked files, or that ran `clean -fd` before deciding whether to, destroyed
-# a contributor's unversioned work with every case still passing.
+# Dirt that is a file git is not tracking. These are where a contributor's experiment
+# most often lives - a formula variant saved beside the real one is untracked, not
+# modified - and CONTRIBUTING.md promises they stop the refresh, while every other
+# case's dirt is a modified tracked file, which `status --porcelain
+# --untracked-files=no` still reports. So a refresh that stopped asking about
+# untracked files, or that deleted them before deciding whether it may, destroyed a
+# contributor's unversioned work with every other case still passing.
 setup_clone_untracked() {
   setup_tap_clone "$1" || return 1
   printf 'notes to myself, never committed\n' > "$1/tap-clone/experiment.md" || return 1
@@ -731,8 +753,8 @@ setup_clone_untracked() {
 }
 
 # One commit the checkout does not have, and nothing uncommitted. This is the shape
-# that the coerced rev-list destroyed: `dirty` empty and `ahead` read as 0 means
-# both refusal branches are skipped and reset --hard runs.
+# that the coerced rev-list destroyed: `dirty` empty and `ahead` read as 0 means both
+# refusal branches are skipped and the refresh runs over the clone's own commit.
 setup_clone_ahead() {
   setup_tap_clone "$1" || return 1
   printf 'a local experiment\n' > "$1/tap-clone/experiment.txt" || return 1
@@ -753,8 +775,8 @@ setup_clone_uncommitted_formula() {
 # A second repository, for the case about GIT_DIR. `git -C <dir>` does not override
 # GIT_DIR, so with one exported - the ordinary state inside any git hook - every
 # git call in validate-formula.sh reads the repository GIT_DIR names rather than
-# the one -C points at, including the two that decide whether refreshing the tap
-# clone would destroy work, immediately above `reset --hard` and `clean -fd`.
+# the one -C points at, including the commands that decide whether refreshing the tap
+# clone would destroy work, immediately above the refresh that acts on the answer.
 #
 # The decoy is a clean clone of the checkout at its own HEAD, chosen so that the
 # unprotected script produces a passing run rather than an error: nothing is
@@ -854,8 +876,8 @@ setup_clone_skip_worktree_formula() {
 
 # The next three fixtures are one shape in three forms: a path the FETCHED commit
 # tracks, held in the clone as a locally created ignored file. Ignored files are
-# absent from `status` and from `ls-files -v`, and `clean -fd` without -x leaves them
-# alone, so for every other case they are correctly none of this script's business.
+# absent from `status` and from `ls-files -v`, and nothing in the refresh deletes them,
+# so for every other case they are correctly none of this script's business.
 # This shape is different, and none of the inventory's lists can see it.
 #
 # Three forms rather than one because an exact-path comparison catches only the first,
@@ -926,16 +948,34 @@ setup_clone_ignored_dir_collision() {
   cp "$1/tap-clone/notes/private" "$1/hidden-bytes" || return 1
 }
 
+# The escape hatch's own shape: a tracked edit to the formula, which is what `brew edit
+# rvben/rumdl/rumdl` leaves, and which the commit under validation always changes too.
+# DISCARD_TAP_CLONE=1 says those go, so the run has to reach the fetched commit.
+setup_clone_dirty_for_discard() { setup_clone_dirty "$1"; }
+
+# The hatch crossed with the collision the refresh must never resolve by force. Both
+# halves are needed for this to test anything: the tracked edit is what makes the hatch
+# branch run at all, and the ignored file the fetched commit tracks is what must still be
+# there afterwards. `checkout -f` would satisfy the hatch and destroy that file, so this
+# case is what stands between the two and fails if anyone reaches for -f.
+setup_clone_dirty_and_ignored_collision() {
+  setup_clone_ignored_tracked_upstream "$1" || return 1
+  printf '# an uncommitted edit, as brew edit would leave\n' >> "$1/tap-clone/Formula/rumdl.rb" || return 1
+}
+
+case_env_discard_tap_clone() { # <casedir>
+  printf 'DISCARD_TAP_CLONE=1\n'
+}
+
 # A clone carrying its own post-checkout hook. Not a collision case: the point is that
 # refreshing the clone must not EXECUTE anything the clone brought with it. `reset --hard`
 # ran no hooks, so switching the refresh to `checkout` started running them, and a hook
 # gets to act after the inventory has finished deciding what may be touched - it can edit
-# the tracked formula the brew checks are about to read, and it can create files that the
-# `clean -qfd` after the refresh then deletes.
+# the tracked formula the brew checks are about to read.
 #
-# The marker goes OUTSIDE the clone, two ways round: a hook that only wrote inside it
-# would have its evidence deleted by that very clean, and the case would pass whether or
-# not the hook ran. Written with a relative path rather than by interpolating the case
+# The marker goes OUTSIDE the clone, so that nothing the refresh does to that working tree
+# can remove the evidence, and so that a hook whose only effect was outside the clone is
+# caught as well. Written with a relative path rather than by interpolating the case
 # directory, for the reason write_brew_stub gives below - a path can contain an
 # apostrophe - and because git runs a post-checkout hook from the top of the working
 # tree, which makes `../hook-ran` the case directory.
@@ -978,6 +1018,51 @@ printf '/\0'
 PROG
   chmod +x "$1/tap-clone/.git/fsm" || return 1
   scratch_git -C "$1/tap-clone" config core.fsmonitor .git/fsm || return 1
+}
+
+# core.worktree in the clone sends every worktree command somewhere else. Built in the
+# DANGEROUS shape deliberately: the redirected directory holds exactly the clone's
+# tracked files, unmodified, so the inventory reads clean and the refresh proceeds -
+# which is how the fetched commit gets written into a directory nobody nominated while
+# the tap path keeps the old formula brew then reads. Built with modifications in it
+# instead, the run refuses and the case would pass without testing anything.
+setup_clone_worktree_redirect() {
+  setup_tap_clone "$1" || return 1
+  mkdir -p "$1/elsewhere" || return 1
+  # The clone's index, extracted into that directory: identical bytes and modes, so
+  # `status` there reports nothing at all.
+  scratch_git -C "$1/tap-clone" --work-tree="$1/elsewhere" \
+    checkout-index --all --force || return 1
+  cp "$1/elsewhere/Formula/rumdl.rb" "$1/elsewhere-formula.rb" || return 1
+  scratch_git -C "$1/tap-clone" config core.worktree "$1/elsewhere" || return 1
+}
+
+# The third execution point, and the one no override can close: the FETCHED commit's
+# .gitattributes names a filter driver, and the clone's config says what that driver
+# runs. So the program runs whatever this script passes on the command line, and the
+# formula in the working tree afterwards is the program's output rather than the commit's
+# bytes. What is guarded is therefore the outcome, not the execution: the run must refuse
+# rather than let brew check bytes nothing validated.
+setup_clone_smudge_filter() {
+  setup_tap_clone "$1" || return 1
+  printf 'Formula/rumdl.rb filter=tapf\n' > "$1/.gitattributes" || return 1
+  scratch_git -C "$1" add -f .gitattributes || return 1
+  scratch_git -C "$1" commit -q -m "the fetched commit selects a filter driver" || return 1
+  cat > "$1/smudge" <<'PROG'
+#!/bin/sh
+cat >/dev/null
+printf 'class Rumdl\n  # THE SMUDGE FILTER WROTE THIS, NOT THE COMMIT\nend\n'
+PROG
+  chmod +x "$1/smudge" || return 1
+  scratch_git -C "$1/tap-clone" config filter.tapf.smudge "$1/smudge" || return 1
+}
+
+# One setting, no .gitattributes and no program: core.autocrlf=true rewrites every file
+# git checks out, and one of them is the formula brew audits. The likeliest of all these
+# to be set by an actual contributor rather than by an attacker.
+setup_clone_autocrlf() {
+  setup_tap_clone "$1" || return 1
+  scratch_git -C "$1/tap-clone" config core.autocrlf true || return 1
 }
 
 setup_clone_post_checkout_hook() {
@@ -1122,7 +1207,7 @@ assert_clone_refreshed() { # <casedir>
   # refresh actually promises is that the clone IS the checkout's commit, which is
   # a clean tree at that ref and nothing weaker.
   local residue
-  residue="$(scratch_git -C "$1/tap-clone" status --porcelain)"
+  residue="$(clone_git "$1" status --porcelain)"
   if [ -n "$residue" ]; then
     echo "the tap clone is at the checkout's HEAD but is not clean at it, so part"
     echo "of what brew reads is still from the previous commit:"
@@ -1174,6 +1259,80 @@ assert_clone_refreshed_and_clone_code_unrun() { # <casedir>
   return "$bad"
 }
 
+# The fsmonitor case's own positive control, and the reason it is not folded into the
+# function above: that function asserts the ABSENCE of an effect, and an absence is what
+# a fixture git never honours looks like too. If a future git ignores a relative
+# core.fsmonitor path, or stops consulting the hook for `status`, the guard keeps passing
+# while guarding nothing. So after the suppression is asserted, the same clone runs one
+# UNWRAPPED command, which must produce the marker. Deliberately last: it executes the
+# clone's program, which rewrites the formula, so every assertion above it has to have
+# read the clone already.
+assert_clone_code_unrun_and_fixture_live() { # <casedir>
+  assert_clone_refreshed_and_clone_code_unrun "$1" || return 1
+  git -C "$1/tap-clone" status --porcelain >/dev/null 2>&1
+  if [ ! -f "$1/fsm-ran" ]; then
+    echo "harness: this case's core.fsmonitor fixture never runs on this git, so the"
+    echo "assertion above proved nothing. One unwrapped 'git status' in the same clone"
+    echo "was supposed to produce the marker and did not - the fixture needs fixing"
+    echo "before the guard it tests can be trusted:"
+    scratch_git -C "$1/tap-clone" config --get core.fsmonitor | sed 's/^/  core.fsmonitor=/'
+    git --version | sed 's/^/  /'
+    return 1
+  fi
+}
+
+# Both questions core.worktree raises, because the answers are independent and the
+# dangerous arm is the one that exits 0: the clone brew reads must hold the commit under
+# validation, AND the directory the stale key pointed at must be byte-for-byte what it
+# was. A refresh that wrote the fetched commit into that directory has destroyed files
+# nobody nominated, which no message check would notice.
+assert_clone_refreshed_and_elsewhere_untouched() { # <casedir>
+  local bad=0
+  assert_clone_refreshed "$1" || bad=1
+  if ! cmp -s "$1/elsewhere-formula.rb" "$1/elsewhere/Formula/rumdl.rb"; then
+    echo "core.worktree in the clone sent the refresh into $1/elsewhere, so the fetched"
+    echo "commit was written over a directory nobody nominated:"
+    diff "$1/elsewhere-formula.rb" "$1/elsewhere/Formula/rumdl.rb" | sed 's/^/  /'
+    bad=1
+  fi
+  # The fetched commit adds a second file, so a redirected checkout leaves a trace the
+  # formula comparison alone would miss.
+  if [ -e "$1/elsewhere/later.txt" ]; then
+    echo "the refresh created $1/elsewhere/later.txt: the fetched commit was checked out"
+    echo "into the directory core.worktree named, not into the tap clone"
+    bad=1
+  fi
+  return "$bad"
+}
+
+# core.autocrlf is the one mechanism here with no program and no attacker, so the run is
+# expected to COMPLETE - refusing on it would reject an ordinary contributor's clone.
+# `assert_clone_refreshed` already compares bytes, so a CR would fail it; the explicit
+# check exists to name the mechanism in the failure rather than print a diff of a file
+# that looks identical.
+assert_clone_refreshed_without_eol_conversion() { # <casedir>
+  assert_clone_refreshed "$1" || return 1
+  local crs
+  crs="$(tr -dc '\r' < "$1/tap-clone/Formula/rumdl.rb" | wc -c | tr -d ' ')"
+  if [ "$crs" != 0 ]; then
+    echo "the clone's core.autocrlf rewrote the line endings of the formula brew audits"
+    echo "($crs CR bytes), so brew is checking bytes no commit contains"
+    return 1
+  fi
+}
+
+# A refusal is only a refusal if it stopped the thing it was protecting. The byte check
+# sits above the brew checks precisely so audit, style and install never see a formula
+# nothing validated, and "the message was printed" does not establish that.
+assert_refused_before_brew_checks() { # <casedir>
+  if grep -q '^==> brew audit' "$1/out.txt"; then
+    echo "the run printed the refusal and then ran the brew checks anyway, which is what"
+    echo "the refusal exists to prevent:"
+    sed 's/^/  /' "$1/out.txt" | tail -8
+    return 1
+  fi
+}
+
 # The de-ignored file: refreshed, and the file still there. Both halves, and the residue
 # checked by equality rather than presence - "the clone is not clean" would also pass on
 # a refresh that left the whole previous commit behind, which is the opposite failure.
@@ -1195,7 +1354,7 @@ assert_clone_refreshed_keeping_deignored() { # <casedir>
   fi
   assert_clone_hidden_bytes_only "$1" || bad=1
   rel="$(cat "$1/hidden-path" 2>/dev/null)"
-  residue="$(scratch_git -C "$1/tap-clone" status --porcelain)"
+  residue="$(clone_git "$1" status --porcelain)"
   if [ "$residue" != "?? $rel" ]; then
     echo "the refreshed clone should hold exactly one untracked path, $rel - the file"
     echo "whose ignore rule the fetched commit dropped - but it holds:"
@@ -1249,7 +1408,7 @@ assert_clone_kept_its_commit() { # <casedir>
     return 1
   fi
   if [ "$want" != "$got" ]; then
-    echo "the clone's own commit was destroyed by reset --hard"
+    echo "the clone's own commit was destroyed by the refresh"
     echo "  it was at: $want"
     echo "  now at:    $got"
     return 1
@@ -1333,7 +1492,7 @@ assert_clone_hidden_bytes_kept() { # <casedir>
 
 assert_clone_still_dirty() { # <casedir>
   assert_clone_head_unmoved "$1" || return 1
-  if [ -z "$(scratch_git -C "$1/tap-clone" status --porcelain)" ]; then
+  if [ -z "$(clone_git "$1" status --porcelain)" ]; then
     echo "the clone's uncommitted changes were discarded"
     return 1
   fi
@@ -1814,10 +1973,10 @@ case_run "a tap clone with uncommitted changes is not discarded" 1 \
 
 # Untracked files and an untracked directory in the clone. A separate case from the
 # uncommitted-changes one because the two are found by different things: a modified
-# tracked file shows in `status` however it is invoked, while untracked files need
-# `status` to be asked about them and are what `clean -fd` deletes. Dropping
-# them from the check, or cleaning before deciding, left every other case
-# passing while a contributor's unversioned notes were gone for good.
+# tracked file shows in `status` however it is invoked, while untracked files are
+# reported only when `status` is asked about them. Dropping them from the inventory, or
+# deleting them before deciding whether that is allowed, left every other case passing
+# while a contributor's unversioned notes were gone for good.
 CASE_SETUP=setup_clone_untracked
 CASE_STUBS=stubs_validator
 CASE_ASSERT=assert_clone_untracked_kept
@@ -1871,8 +2030,8 @@ CASE_ASSERT=assert_clone_refreshed_and_decoy_untouched
 case_run "an inherited GIT_DIR does not redirect the tap-clone checks" 0 \
   "Clearing inherited git repository overrides" validate-formula.sh < "$FORMULA"
 
-# Three more ways the inventory in front of `reset --hard` and `clean -fd` comes
-# back empty on a clone that holds work. None of them is an error state: git is
+# Three more ways the inventory in front of the refresh comes back empty on a clone
+# that holds work. None of them is an error state: git is
 # being asked a narrower question than the one the answer gets used for, and it
 # answers the narrow question correctly.
 #
@@ -1898,7 +2057,7 @@ case_run "an inherited GIT_CONFIG_COUNT cannot hide the clone's untracked files"
 
 # A tracked file marked assume-unchanged and then edited. git reports no change for
 # it anywhere - not `status`, not `diff --quiet HEAD` - so every other assertion in
-# this suite passes while `reset --hard` rewrites the file from the index. Whether
+# this suite passes while the refresh rewrites the file from the index. Whether
 # those paths hold edits is unknown rather than known-clean, and unknown immediately
 # before a destructive command has to stop the run.
 CASE_SETUP=setup_clone_assume_unchanged_edit
@@ -1908,7 +2067,7 @@ case_run "a tracked edit git was told not to stat is not overwritten" 1 \
   "assume-unchanged or skip-worktree" validate-formula.sh < "$FORMULA"
 
 # The same hidden state under the other flag, where nothing is destroyed and the run
-# is wrong anyway: skip-worktree means `reset --hard` leaves the clone's own formula
+# is wrong anyway: skip-worktree means the refresh leaves the clone's own formula
 # in place, so the brew checks audit and install that file while every line the run
 # prints refers to the formula under validation. The refusal is the same one; what it
 # prevents here is a passing run about the wrong bytes.
@@ -1960,6 +2119,32 @@ else
     0 "tap clone now at" validate-formula.sh < "$FORMULA"
 fi
 
+# The escape hatch doing what it says. Untested until now, and it did not: the refresh is
+# a non-forced checkout, which refuses to overwrite a modified tracked file, so the run
+# printed "proceeding over 1 changed path(s)" and then died on git's refusal - for the one
+# shape the hatch is for, since `brew edit` modifies the formula and the commit being
+# validated changes it too. A local commit or an edit to another file completed fine,
+# which is why the hatch looked like it worked. The message is asserted with the deed:
+# a hatch that printed the promise and refused would pass on the text alone.
+CASE_SETUP=setup_clone_dirty_for_discard
+CASE_STUBS=stubs_validator
+CASE_ENV=case_env_discard_tap_clone
+CASE_ASSERT=assert_clone_refreshed
+case_run "DISCARD_TAP_CLONE=1 discards the tracked edit it says it discards" 0 \
+  "Tracked edits and local commits there go" validate-formula.sh < "$FORMULA"
+
+# And the bound on the hatch, which is the case that keeps `checkout -f` out of this
+# script. The hatch is asked for and there is also an ignored file the fetched commit
+# tracks: the tracked edit goes, and that file must still be here afterwards. -f would
+# make the case above pass and this one destroy a contributor's ignored work, measured on
+# the same fixture; clearing the tracked edits with `reset --hard HEAD` keeps both.
+CASE_SETUP=setup_clone_dirty_and_ignored_collision
+CASE_STUBS=stubs_validator
+CASE_ENV=case_env_discard_tap_clone
+CASE_ASSERT=assert_clone_hidden_bytes_kept
+case_run "DISCARD_TAP_CLONE=1 does not extend to an ignored file the commit tracks" 1 \
+  "git refused to refresh" validate-formula.sh < "$FORMULA"
+
 # A hook the clone brought with it. The refresh is allowed to move this clone; it is not
 # allowed to run its code. `reset --hard` ran no hooks, so this case exists because the
 # fix above - handing the collision check to `checkout` - would otherwise have handed the
@@ -1977,9 +2162,44 @@ case_run "the tap clone's own post-checkout hook is not run by the refresh" 0 \
 # formula. This case is about the commands ABOVE the refresh as much as the refresh.
 CASE_SETUP=setup_clone_fsmonitor_program
 CASE_STUBS=stubs_validator
-CASE_ASSERT=assert_clone_refreshed_and_clone_code_unrun
+CASE_ASSERT=assert_clone_code_unrun_and_fixture_live
 case_run "the tap clone's core.fsmonitor program is not run by the refresh" 0 \
   "tap clone now at" validate-formula.sh < "$FORMULA"
+
+# The third setting, and the one that shows why enumerating them stopped being the plan:
+# core.worktree points every worktree command at another directory, so the refresh writes
+# the fetched commit THERE while the tap path keeps the old formula brew then reads. Built
+# in its silent shape on purpose - see the fixture - so this case fails on the previous
+# version of the script by exiting 0 with two wrong outcomes rather than by refusing.
+# These repos reach this state for real: the key goes stale when a worktree is deleted
+# under an interrupted operation, which has happened twice.
+CASE_SETUP=setup_clone_worktree_redirect
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_clone_refreshed_and_elsewhere_untouched
+case_run "core.worktree in the clone does not redirect the refresh out of the tap" 0 \
+  "tap clone now at" validate-formula.sh < "$FORMULA"
+
+# One setting a contributor sets for their own reasons, no program and no adversary:
+# core.autocrlf rewrites what checkout writes, and one of the files it rewrites is the
+# formula brew audits. This run must COMPLETE - refusing here would reject an ordinary
+# clone - with the commit's own bytes in the working tree.
+CASE_SETUP=setup_clone_autocrlf
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_clone_refreshed_without_eol_conversion
+case_run "the clone's core.autocrlf does not rewrite the formula brew audits" 0 \
+  "tap clone now at" validate-formula.sh < "$FORMULA"
+
+# The execution point that cannot be closed from the command line: the driver's NAME comes
+# from the fetched commit's .gitattributes and the command it runs comes from the clone's
+# config, so no `-c` this script can pass disables it, and the fix that would
+# (.git/info/attributes) writes inside the contributor's clone. So what is guarded is the
+# outcome instead - the formula at the path brew reads is not the blob of the commit this
+# run validated - and that check is what every other mechanism here also fails.
+CASE_SETUP=setup_clone_smudge_filter
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_refused_before_brew_checks
+case_run "a formula rewritten by the clone's own filter driver is refused" 1 \
+  "is not the formula in" validate-formula.sh < "$FORMULA"
 
 # A file the clone ignores until the fetched commit stops ignoring it. The refresh must
 # proceed - there is no collision, and nothing in the inventory is holding it back - and
