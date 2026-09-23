@@ -149,6 +149,37 @@ DOWNLOAD_MARKER="Verifying $FORMULA at version"
 # messages that must therefore stay absent, one per line.
 CASE_FORBID=""
 
+# The positive control's own second bound, and the reason the marker is not enough
+# on its own: it is printed immediately BEFORE the download loop, so it attests to
+# the line being reached, not to a download being attempted. A check inserted
+# between the two - or an early `exit` added under it - refuses the unmodified
+# formula with the marker already printed, and a case that accepts any exit code
+# and only the marker reports ok. Verified: an `exit 1` added directly under the
+# marker fails 9 other cases and leaves this one passing.
+#
+# So the attempt itself is asserted, from the stub's own record. Every url in the
+# formula must have been fetched, not merely one: the loop reports per asset and
+# carries on past a failure, so a loop that stopped at the first would still
+# "reach the download stage" while checking one pin out of four.
+assert_reached_the_downloads() { # <casedir>
+  local urls attempts
+  urls="$(grep -c '^[[:space:]]*url "' "$1/original.rb")"
+  if [ ! -s "$1/curl.attempts" ]; then
+    echo "the download marker was printed but no download was ever attempted, so"
+    echo "the run stopped between the marker and the loop and this control did not"
+    echo "notice - which is the whole job of this case:"
+    sed 's/^/  /' "$1/out.txt" | head -8
+    return 1
+  fi
+  attempts="$(wc -l < "$1/curl.attempts" | tr -d ' ')"
+  if [ "$attempts" != "$urls" ]; then
+    echo "the formula carries $urls urls but the loop fetched $attempts, so it did not"
+    echo "check every pin and a wrong one could go unreported:"
+    sed 's/^/  fetched: /' "$1/curl.attempts"
+    return 1
+  fi
+}
+
 assert_refused_before_download() { # <casedir>
   if grep -qF -- "$DOWNLOAD_MARKER" "$1/out.txt"; then
     echo "the message was printed, but the run went on to the download stage, so"
@@ -302,8 +333,21 @@ command -v python3 >/dev/null 2>&1 || {
 # A curl that cannot succeed, so the structural checks are all that runs. Exit 6
 # is curl's own "could not resolve host", which is what an offline run would give
 # anyway.
+#
+# It records the attempt before failing, into the directory the case runs in rather
+# than its own: this stub is written once and shared by every case, so a log beside
+# the stub would accumulate across all of them and could not answer "did THIS case
+# download anything". $PWD is the case directory, because case_run cds into it.
+# The record is what lets the positive control assert the download stage was
+# REACHED rather than announced - the marker is printed one line before the loop,
+# so a check inserted between the two refuses the formula with the marker already
+# on stdout.
 mkdir -p "$WORK/stub"
-printf '#!/bin/sh\nexit 6\n' > "$WORK/stub/curl"
+cat > "$WORK/stub/curl" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$PWD/curl.attempts"
+exit 6
+STUB
 chmod +x "$WORK/stub/curl"
 export PATH="$WORK/stub:$PATH"
 
@@ -2544,6 +2588,13 @@ echo
 # The positive control. The unmodified formula must clear every structural
 # check and reach the download stage, which this line marks. Without this a
 # guard that rejected everything would pass every other case here.
+#
+# The marker AND the attempt, because the marker is printed one line before the
+# loop and so cannot distinguish "reached the downloads" from "announced them and
+# stopped". The exit code stays `any`: the stub curl fails every fetch, so a run
+# that does everything right still exits 1, and the code carries no information
+# here. The assertion is what bounds this case.
+CASE_ASSERT=assert_reached_the_downloads
 case_run "unmodified formula clears every structural check" any \
   "$DOWNLOAD_MARKER" verify-formula.sh < "$FORMULA"
 
