@@ -260,4 +260,15 @@ smoke "$tmp/bad.md" 1 MD022
 smoke "$tmp/good.md" 0 Success
 echo
 
+# The tap's own documentation, linted by the binary the tap just installed. Two
+# things at once, which is why it sits here rather than in a lint job of its own:
+# this repository's markdown gets the tool it ships (nothing else checks it, and a
+# markdown linter's tap with unlinted docs is its own kind of bug), and the binary
+# gets real prose instead of the two synthetic files above. --no-config so it is
+# the default rule set, the same one a user gets, and not whatever config
+# discovery finds by walking up from here.
+echo "==> The installed binary lints this repository's own docs"
+"$RUMDL" check --no-config README.md CONTRIBUTING.md
+echo
+
 echo "All checks passed, install and test included."

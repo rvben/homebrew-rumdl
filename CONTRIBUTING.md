@@ -82,7 +82,7 @@ passes both before and after proves nothing.
 
 ```bash
 ./scripts/validate-formula.sh            # guards, pins, audit, style, strict audit
-./scripts/validate-formula.sh --install  # also brew install and brew test
+./scripts/validate-formula.sh --install  # also install, test, lint these docs
 ```
 
 This runs what CI runs, in the same order, `scripts/test-guards.sh` included, so
@@ -110,13 +110,16 @@ know:
 `main` that touch `Formula/**` or `scripts/**`, daily on a schedule, and on
 explicit dispatch. Its jobs:
 
-- `pins`: `scripts/test-guards.sh`, then every platform's pin from one runner,
-  without Homebrew.
+- `pins`: `shellcheck` over every script, then `scripts/test-guards.sh`, then
+  every platform's pin from one runner, without Homebrew. Every check here is a
+  shell script, so a shell defect is a guard defect.
 - `brew`: `scripts/validate-formula.sh --install` on all four platforms the
   formula declares, which is the guard suite, the pins, `brew audit`, `brew
-  style`, `brew audit --strict --online`, `brew install` and `brew test`. Each
-  runner can only install and run the binary for the platform it is on, which is
-  why the `pins` job exists and why the matrix is four runners rather than two.
+  style`, `brew audit --strict --online`, `brew install`, `brew test`, and
+  finally this repository's own markdown linted by the rumdl the tap just
+  installed. Each runner can only install and run the binary for the platform it
+  is on, which is why the `pins` job exists and why the matrix is four runners
+  rather than two.
 - `freshness` (scheduled and manual runs only): is the formula still pointing at
   rumdl's newest release? Nothing else asks. The update arrives as a dispatch
   from rumdl's release workflow, whose notify step is `continue-on-error: true`,

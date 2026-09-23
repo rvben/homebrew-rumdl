@@ -40,6 +40,21 @@ jobs:
       - name: Checkout tap
         uses: actions/checkout@v6
 
+      # Every check in this repository is a shell script, so a shell bug is a
+      # guard bug. shellcheck ships on the runner image; the explicit existence
+      # test is there because a `command not found` from a lint step reads as the
+      # lint passing with nothing to say, which is how the suite's own missing
+      # python3 once presented itself.
+      - name: The scripts are free of shell defects
+        run: |
+          set -euo pipefail
+          command -v shellcheck >/dev/null 2>&1 || {
+            echo "::error::shellcheck is not on this runner image any more"
+            exit 1
+          }
+          shellcheck --version | sed -n 2p
+          shellcheck scripts/*.sh
+
       # Before trusting the check below, check the checker. Offline and hermetic,
       # so it costs seconds: it breaks the formula one way at a time and requires
       # the guard to reject each one with the message belonging to the check under
