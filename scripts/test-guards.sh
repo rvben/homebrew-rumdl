@@ -1046,6 +1046,59 @@ setup_clone_rebase_in_progress() {
   scratch_git -C "$1/tap-clone" rev-parse HEAD > "$1/clone-head.txt" || return 1
 }
 
+# A multi-commit cherry-pick stopped mid-sequence, which is the same class and a different
+# file: .git/sequencer rather than .git/rebase-merge, and CHERRY_PICK_HEAD beside it, which
+# the reset DOES clear. Measured both ways round: where the sequence had nothing left to do
+# the reset cleared the directory too, and that arm is what first suggested a sequence was
+# covered; with work remaining it survives the reset and the checkout and git still reports
+# a cherry-pick in progress.
+#
+# Stopped on an EMPTY commit rather than a conflict, on purpose. A conflict leaves
+# unmerged paths, which `status` reports, so the inventory would refuse over the dirty
+# tree and the case would pass without the guard under test. Stopped on an empty commit the
+# tree is clean, HEAD has not moved, and nothing was committed - so the sequencer is the
+# only thing left to refuse over. The two commits live on another branch, which keeps
+# `rev-list FETCH_HEAD..HEAD` at zero as well.
+#
+# No fetch here either, which is what lets the assertion check WHERE the refusal happens:
+# a clone that has never fetched has no FETCH_HEAD, so the file appearing means the run
+# got past the fetch before refusing.
+setup_clone_cherry_pick_sequence() {
+  setup_tap_clone "$1" || return 1
+  local branch
+  branch="$(scratch_git -C "$1/tap-clone" rev-parse --abbrev-ref HEAD)" || return 1
+  scratch_git -C "$1/tap-clone" checkout -q -b sequence-source || return 1
+  scratch_git -C "$1/tap-clone" commit -q --allow-empty -m "an empty commit to pick" ||
+    return 1
+  printf 'a second commit to pick\n' > "$1/tap-clone/picked.txt" || return 1
+  scratch_git -C "$1/tap-clone" add -f picked.txt || return 1
+  scratch_git -C "$1/tap-clone" commit -q -m "a second commit to pick" || return 1
+  scratch_git -C "$1/tap-clone" checkout -q "$branch" || return 1
+  scratch_git -C "$1/tap-clone" cherry-pick sequence-source~1 sequence-source \
+    >/dev/null 2>&1
+  # Every premise of this case, asserted rather than assumed: the sequence is on disk,
+  # nothing is dirty, and HEAD has not moved. Without all three the case could pass on a
+  # script with no guard in it.
+  if [ ! -e "$1/tap-clone/.git/sequencer" ]; then
+    echo "harness: no cherry-pick sequence was left in progress in the clone" >&2
+    return 1
+  fi
+  if [ -n "$(scratch_git -C "$1/tap-clone" status --porcelain --untracked-files=normal)" ]; then
+    echo "harness: the clone is dirty, so this case would refuse over that instead" >&2
+    scratch_git -C "$1/tap-clone" status --porcelain --untracked-files=normal >&2
+    return 1
+  fi
+  if [ "$(scratch_git -C "$1/tap-clone" rev-parse HEAD)" != "$(cat "$1/clone-head.txt")" ]; then
+    echo "harness: the stopped sequence committed something, so HEAD moved" >&2
+    return 1
+  fi
+  if [ -e "$1/tap-clone/.git/FETCH_HEAD" ]; then
+    echo "harness: the clone has already fetched, so this case cannot tell whether the" >&2
+    echo "         refusal happened before the fetch" >&2
+    return 1
+  fi
+}
+
 # This checkout IS the tap clone, which is what `cd "$(brew --repository rvben/rumdl)"`
 # leaves someone in. The formula is edited and uncommitted, because that is the state the
 # collapse costs something in: the pin check reads the edit, the reset puts HEAD's bytes
@@ -1832,6 +1885,29 @@ assert_clone_rebase_still_in_progress() { # <casedir>
   return "$bad"
 }
 
+# The same refusal over a stopped cherry-pick sequence, plus where it happened. The clone
+# has never fetched, so FETCH_HEAD existing at all means the run wrote into that
+# repository before deciding it would not touch it - which is the difference between
+# "stops before the reset" and "stops before anything", and the printed message claims the
+# second.
+assert_clone_sequence_untouched() { # <casedir>
+  local bad=0
+  if [ ! -e "$1/tap-clone/.git/sequencer" ]; then
+    echo "the clone's cherry-pick sequence is gone - the run discarded an operation the"
+    echo "contributor left half-applied, which a reset does not do on its own"
+    bad=1
+  fi
+  if [ -e "$1/tap-clone/.git/FETCH_HEAD" ]; then
+    echo "the clone has a FETCH_HEAD, so the refusal arrived after the fetch had already"
+    echo "written into that repository, and the message saying nothing was fetched is"
+    echo "false"
+    bad=1
+  fi
+  assert_clone_head_unmoved "$1" || bad=1
+  assert_refused_before_brew_checks "$1" || bad=1
+  return "$bad"
+}
+
 # The checkout that is also the tap clone. The refusal has to arrive with the contributor's
 # uncommitted formula still where it was: this guard exists because the run would otherwise
 # reset that file and report pins for the bytes it replaced.
@@ -2608,6 +2684,17 @@ CASE_STUBS=stubs_validator
 CASE_ENV=case_env_discard_tap_clone
 CASE_ASSERT=assert_clone_rebase_still_in_progress
 case_run "DISCARD_TAP_CLONE=1 does not cover a rebase left in progress" 1 \
+  "git operation in progress" validate-formula.sh < "$FORMULA"
+
+# The sequencer form of it, and the case that pins WHERE the refusal happens: this clone
+# has never fetched, so the assertion can require that it still has not. The guard sat
+# after the fetch when it was first written, which made the printed claim that nothing had
+# been written false for the one run that prints it.
+CASE_SETUP=setup_clone_cherry_pick_sequence
+CASE_STUBS=stubs_validator
+CASE_ENV=case_env_discard_tap_clone
+CASE_ASSERT=assert_clone_sequence_untouched
+case_run "DISCARD_TAP_CLONE=1 does not cover a cherry-pick sequence" 1 \
   "git operation in progress" validate-formula.sh < "$FORMULA"
 
 # The script run from inside the tap clone, which is one directory doing both jobs. The tap

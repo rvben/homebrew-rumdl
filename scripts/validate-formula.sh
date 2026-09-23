@@ -258,6 +258,57 @@ if brew tap | grep -qx rvben/rumdl; then
       -c core.autocrlf=false -c core.eol=lf "$@"
   }
   echo "==> Refreshing the existing rvben/rumdl tap clone from $TAP_DIR"
+  # An operation left half-finished in that clone is state neither the reset nor the
+  # checkout clears, so nothing here may run past it - not even the fetch. Nothing
+  # prevents a contributor from starting one: `brew edit rvben/rumdl/rumdl` puts them in
+  # this clone in the first place, and a rebase, a bisect or a cherry-pick of what they
+  # found is an ordinary next step.
+  #
+  # Measured on git 2.50.1, each operation's state confirmed present before the two steps
+  # ran, and each stopped sequence given work still to do:
+  #
+  #   conflicted merge          MERGE_HEAD                    cleared by the reset
+  #   conflicted cherry-pick    CHERRY_PICK_HEAD              cleared by the reset
+  #   conflicted revert         REVERT_HEAD                   cleared by the reset
+  #   rebase -i stopped         rebase-merge                  SURVIVES reset + checkout
+  #   conflicted rebase         rebase-merge                  SURVIVES reset + checkout
+  #   rebase --apply stopped    rebase-apply                  SURVIVES reset + checkout
+  #   bisect in progress        BISECT_START                  SURVIVES reset + checkout
+  #   multi-commit pick/revert  sequencer (+ *_PICK_HEAD)     SURVIVES reset + checkout
+  #
+  # The sequencer row is the one that needed measuring twice. Where the sequence had
+  # nothing left to do - the conflict fell on its LAST commit - the reset cleared the
+  # directory, and that arm is what first suggested a sequence was covered. With work
+  # remaining it survives both steps and git still reports "Cherry-pick currently in
+  # progress", so a contributor's half-applied sequence would be left attached to a HEAD
+  # this script moved. Four arms of the first version of that probe set up no conflict at
+  # all and proved nothing.
+  #
+  # For every surviving state, refreshing moves HEAD out from under the operation while
+  # DISCARD_TAP_CLONE=1 prints that HEAD's bytes were restored. The hatch is for tracked
+  # edits; this is not one, so it stops in both modes. git's own --git-path locates these,
+  # rather than a hand-built .git path, because the answer differs in a linked worktree.
+  in_progress=""
+  for op in rebase-merge rebase-apply BISECT_START sequencer; do
+    op_path="$(tap_git rev-parse --git-path "$op" 2>/dev/null || true)"
+    if [ -n "$op_path" ] && [ -e "$tap_repo/$op_path" ]; then
+      in_progress="$in_progress $op"
+    fi
+  done
+  if [ -n "$in_progress" ]; then
+    echo "error: the rvben/rumdl tap clone has a git operation in progress" >&2
+    echo "       $tap_repo" >&2
+    echo "       git state left behind:$in_progress" >&2
+    echo "       Refreshing it would move HEAD out from under that operation, and a" >&2
+    echo "       reset does not clear these the way it clears a merge, so" >&2
+    echo "       DISCARD_TAP_CLONE=1 does not cover it either." >&2
+    echo "       Finish it or abandon it (git -C \"$tap_repo\" rebase --abort," >&2
+    echo "       git -C \"$tap_repo\" cherry-pick --abort, git -C \"$tap_repo\" bisect" >&2
+    echo "       reset), or drop the tap (brew untap rvben/rumdl)." >&2
+    echo "       Nothing has been fetched or written yet." >&2
+    exit 1
+  fi
+
   tap_git fetch --quiet "$TAP_DIR" HEAD
 
   # The refresh discards whatever is in that clone, and `brew edit
@@ -326,47 +377,6 @@ if brew tap | grep -qx rvben/rumdl; then
     echo "       Inspect the clone, or drop the tap (brew untap rvben/rumdl)." >&2
     exit 1
   fi
-  # An operation left half-finished in that clone is state neither the reset nor the
-  # checkout clears, so the refresh must not run past it. Nothing prevents a
-  # contributor from starting one there: `brew edit rvben/rumdl/rumdl` puts them in
-  # this clone in the first place, and a rebase or a bisect of what they found is an
-  # ordinary next step. Measured on git 2.50.1, seven operations, each one's state
-  # confirmed present before the two steps ran - the first run of that probe set up
-  # no conflict, so four arms left nothing behind and proved nothing:
-  #
-  #   conflicted merge         MERGE_HEAD        cleared by the reset
-  #   conflicted cherry-pick   CHERRY_PICK_HEAD  cleared by the reset
-  #   conflicted revert        REVERT_HEAD       cleared by the reset
-  #   rebase -i stopped        rebase-merge      SURVIVES the reset and the checkout
-  #   conflicted rebase        rebase-merge      SURVIVES both
-  #   rebase --apply stopped   rebase-apply      SURVIVES both
-  #   bisect in progress       BISECT_START      SURVIVES both
-  #
-  # For the three that survive, refreshing moves HEAD out from under the operation and
-  # leaves it pointing at commits the contributor never chose, while
-  # DISCARD_TAP_CLONE=1 prints that HEAD's bytes were restored. The hatch is for
-  # tracked edits; this is not one, so it stops in both modes. git's own --git-path is
-  # what locates these, rather than a hand-built .git path, because the answer differs
-  # in a linked worktree.
-  in_progress=""
-  for op in rebase-merge rebase-apply BISECT_START; do
-    op_path="$(tap_git rev-parse --git-path "$op" 2>/dev/null || true)"
-    if [ -n "$op_path" ] && [ -e "$tap_repo/$op_path" ]; then
-      in_progress="$in_progress $op"
-    fi
-  done
-  if [ -n "$in_progress" ]; then
-    echo "error: the rvben/rumdl tap clone has a git operation in progress" >&2
-    echo "       $tap_repo" >&2
-    echo "       git state left behind:$in_progress" >&2
-    echo "       Refreshing it would move HEAD out from under that operation, and a" >&2
-    echo "       reset does not clear these the way it clears a merge, so" >&2
-    echo "       DISCARD_TAP_CLONE=1 does not cover it either." >&2
-    echo "       Finish it or abandon it (git -C \"$tap_repo\" rebase --abort," >&2
-    echo "       git -C \"$tap_repo\" bisect reset), or drop the tap" >&2
-    echo "       (brew untap rvben/rumdl)." >&2
-    exit 1
-  fi
   if { [ -n "$dirty" ] || [ -n "$hidden" ] || [ "$ahead" != "0" ]; } &&
      [ "${DISCARD_TAP_CLONE:-0}" = "1" ]; then
     # "over", not "discarding": a path HEAD does not track stays where it is now that no
@@ -396,8 +406,9 @@ if brew tap | grep -qx rvben/rumdl; then
     # The last two arms are why the sentence below says "a path HEAD tracks" rather than
     # "everything": a submodule's own working tree is not reset with the superproject, and
     # a rebase left in progress survives both the reset and the checkout. The rebase is
-    # reachable - a contributor can start one in the clone - and is refused above, before
-    # either mode gets here, together with a bisect and the other rebase backend. The
+    # reachable - a contributor can start one in the clone - and is refused before the
+    # fetch above, together with a bisect, the other rebase backend and a multi-commit
+    # cherry-pick or revert sequence. The
     # submodule arm is stated for the sentence's accuracy rather than guarded: this
     # repository declares no submodules, so a clone of a commit of it has none unless
     # someone adds one by hand, and that shape is a tracked path the inventory above

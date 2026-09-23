@@ -156,38 +156,45 @@ to know:
   `trustedtaps` entry you want: installing a formula by its full name records a
   separate `trustedformulae` entry, and that one does go away again when you
   uninstall the formula. Both measured on 7.0.6.
-- If you already have the tap, it refreshes that clone from your checkout instead
-  of re-tapping, because `brew tap --force` on an already-tapped name does
-  nothing and brew would keep checking the old commit. `brew edit
-  rvben/rumdl/rumdl` edits exactly that clone, so the refresh stops rather than
-  overwrite anything it finds there: uncommitted changes, untracked files, commits
-  your checkout does not have, or a path marked `assume-unchanged` or
-  `skip-worktree`, which git does not stat and so cannot report as clean. Stash
-  them, copy them into your checkout, or run with `DISCARD_TAP_CLONE=1`. That
-  hatch resets the clone to its own `HEAD` first, so every file `HEAD` tracks
-  there goes back to `HEAD`'s bytes, and an unfinished merge is cleared with it,
-  as are a conflicted cherry-pick and a conflicted revert. A rebase or a bisect
-  is not: measured on git 2.50.1, `.git/rebase-merge`, `.git/rebase-apply` and
-  `BISECT_START` all survive the reset and the refresh alike, so the script
-  stops on those before it touches anything, in either mode, and says which
-  state it found. Finish the operation or abandon it (`git rebase --abort`, `git
-  bisect reset`), then run again. Two shapes of a tracked edit are worth naming,
-  because `git status` reports neither as a modified file: an edit to a path
-  marked `assume-unchanged`, and a path staged as deleted whose own bytes are
-  still standing there, which status calls untracked as well as deleted. A path
-  `HEAD` does not track is not touched: nothing in the script deletes untracked
-  or ignored files any more, so they stay where they are and the run continues
-  past them. Two things the hatch deliberately does not cover, because being
-  stopped is the better outcome: a file
-  the clone holds that the new commit starts tracking, which git refuses to
-  overwrite, and a path marked `skip-worktree`, whose local bytes the reset
-  honours - if the new commit changes that path the refresh aborts, and if it does
-  not, the check that compares what brew is about to read against the commit under
+- If you already have the tap, it refreshes that clone from your checkout
+  instead of re-tapping, because `brew tap --force` on an already-tapped name
+  does nothing and brew would keep checking the old commit. `brew edit
+  rvben/rumdl/rumdl` edits exactly that clone, so the refresh stops rather
+  than overwrite anything it finds there: uncommitted changes, untracked
+  files, commits your checkout does not have, or a path marked `assume-
+  unchanged` or `skip-worktree`, which git does not stat and so cannot report
+  as clean. Stash them, copy them into your checkout, or run with
+  `DISCARD_TAP_CLONE=1`. That hatch resets the clone to its own `HEAD` first,
+  so every file `HEAD` tracks there goes back to `HEAD`'s bytes, and an
+  unfinished merge is cleared with it, as is a conflicted cherry-pick or
+  revert of a single commit. Four states are not: measured on git 2.50.1,
+  `.git/rebase-merge`, `.git/rebase-apply`, `BISECT_START`, and the
+  `.git/sequencer` a multi-commit cherry-pick or revert leaves behind all
+  survive the reset and the refresh alike. That last one had to be measured
+  twice, because a sequence stopped on its own final commit has nothing left
+  to apply and the reset does clear it; with work remaining it stays, and git
+  still reports a cherry-pick in progress after the refresh has moved `HEAD`
+  out from under it. So the script stops on all four before it fetches
+  anything, in either mode, and says which state it found. Finish the
+  operation or abandon it (`git rebase --abort`, `git cherry-pick --abort`,
+  `git bisect reset`), then run again. Two shapes of a tracked edit are worth
+  naming, because `git status` reports neither as a modified file: an edit to
+  a path marked `assume-unchanged`, and a path staged as deleted whose own
+  bytes are still standing there, which status calls untracked as well as
+  deleted. A path `HEAD` does not track is not touched: nothing in the script
+  deletes untracked or ignored files any more, so they stay where they are and
+  the run continues past them. Two things the hatch deliberately does not
+  cover, because being stopped is the better outcome: a file the clone holds
+  that the new commit starts tracking, which git refuses to overwrite, and a
+  path marked `skip-worktree`, whose local bytes the reset honours - if the
+  new commit changes that path the refresh aborts, and if it does not, the
+  check that compares what brew is about to read against the commit under
   validation refuses instead. Move or unmark those yourself. One more shape is
-  named for accuracy rather than guarded: a submodule's own working tree is not
-  reset with the superproject, so an edit inside one survives. This repository
-  declares no submodules, so a clone of it has none unless you add one by hand,
-  and that leaves a tracked path the inventory above already reports.
+  named for accuracy rather than guarded: a submodule's own working tree is
+  not reset with the superproject, so an edit inside one survives. This
+  repository declares no submodules, so a clone of it has none unless you add
+  one by hand, and that leaves a tracked path the inventory above already
+  reports.
 - Run it from your own checkout, never from the tap clone. `brew --repository
   rvben/rumdl` is a full clone of this repository, `scripts/` included, so
   running it there is easy to reach by accident, and then the directory being
