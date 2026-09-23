@@ -127,8 +127,29 @@ fi
 # good --install run.
 installed_from=""
 ours_installed=0
-cellar="$(brew --cellar rumdl 2>/dev/null || true)"
-if [ -n "$cellar" ]; then
+# No `|| true` here. `brew --cellar rumdl` exits 0 and prints the path even when
+# rumdl is not installed, so an empty value means the resolution failed, not that
+# nothing is installed - and swallowing it skips the whole guard below, deciding
+# "nothing is installed" silently. That is the same wrong-answer-dressed-as-a-pass
+# the receipt parsing further down was fixed for. If the formula cannot be
+# resolved, fall back to the deterministic path under the prefix rather than
+# guessing or aborting.
+if ! cellar="$(brew --cellar rumdl 2>/dev/null)" || [ -z "$cellar" ]; then
+  # Assigned inside the `if` for the same reason: a bare
+  # `cellar="$(brew --cellar)/rumdl"` aborts the script with no message at all
+  # under set -e when that call fails too, which is this defect again one line
+  # further down.
+  if prefix_cellar="$(brew --cellar 2>/dev/null)" && [ -n "$prefix_cellar" ]; then
+    cellar="$prefix_cellar/rumdl"
+    echo "    note: brew could not resolve rumdl's cellar; checking $cellar"
+  else
+    echo "error: brew cannot report its Cellar path." >&2
+    echo "       Whether another tap's rumdl is installed cannot be determined," >&2
+    echo "       and guessing would either skip a real conflict or block a good run." >&2
+    exit 1
+  fi
+fi
+if [ -d "$cellar" ]; then
   for receipt in "$cellar"/*/INSTALL_RECEIPT.json; do
     [ -f "$receipt" ] || continue
     # sed rather than a JSON parser: Homebrew writes this file pretty-printed
@@ -184,8 +205,20 @@ echo
 # something else entirely - on a machine with mise or asdf shims, brew itself
 # warns that its binary is shadowed - and then this proves nothing about what was
 # just installed.
-RUMDL="$(brew --prefix rvben/rumdl/rumdl 2>/dev/null || true)/bin/rumdl"
-[ -x "$RUMDL" ] || RUMDL="$(brew --prefix)/bin/rumdl"
+# And no fallback to `$(brew --prefix)/bin/rumdl`: that is whichever rumdl is
+# currently linked into Homebrew's bin, which after a successful install of THIS
+# formula may still be another tap's or another version's. The fallback could only
+# ever run in exactly the situation where the binary's provenance is unknown,
+# which is the situation the paragraph above exists to prevent. A keg that does
+# not resolve right after `brew install rvben/rumdl/rumdl` succeeded is a failure
+# to report, not a reason to test something else.
+if ! keg="$(brew --prefix rvben/rumdl/rumdl 2>/dev/null)" || [ -z "$keg" ]; then
+  echo "error: brew install reported success but rvben/rumdl/rumdl has no prefix" >&2
+  echo "       Refusing to fall back to \$(brew --prefix)/bin/rumdl, which may be" >&2
+  echo "       another tap's or another version's binary." >&2
+  exit 1
+fi
+RUMDL="$keg/bin/rumdl"
 echo "==> The installed binary lints ($RUMDL)"
 [ -x "$RUMDL" ] || { echo "error: $RUMDL is not executable" >&2; exit 1; }
 "$RUMDL" --version
