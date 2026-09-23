@@ -11,10 +11,16 @@
 # guard to reject it *with the message belonging to the check under test*, so a
 # mutation caught by the wrong check is a failure rather than a pass.
 #
-# Two-sided, deliberately. Two cases require a correct run to succeed: case 1 that
-# the unmodified formula clears every structural check and reaches the download
-# stage, and case 13 that a full update pins each url to the bytes that url
-# fetched. Without them, a script that rejected everything would pass this suite.
+# Two-sided, deliberately. Two cases require a correct run to succeed: that the
+# unmodified formula clears every structural check and reaches the download stage,
+# and that a full update pins each url to the bytes that url fetched. Without them,
+# a script that rejected everything would pass this suite.
+#
+# Cases are referred to by name, never by number. The numbers here drifted twice
+# (the version cases were labelled 10-12 while running as 12-14, and the last
+# comment said 26 for case 27), which sends someone diagnosing a failure to the
+# wrong fixture. The harness counts the cases and names their work directories,
+# so that is where a case's number lives.
 #
 # Hermetic and offline. Each case runs the real script against a scratch copy of
 # the repository, so nothing here touches the network, Homebrew, or the working
@@ -730,15 +736,72 @@ case_env_decoy_repo() { # <casedir>
   printf 'GIT_WORK_TREE=%s\n' "$1/decoy"
 }
 
-write_brew_stub() { # write_brew_stub <stubdir> <clonepath>
+# The next three fixtures are all the same shape as the decoy: work that a refresh
+# destroys, which the inventory in front of the refresh cannot see. Each one is
+# reachable by exactly one of the two halves of the fix, so a case cannot pass on
+# the strength of the other half.
+#
+# Untracked files, hidden by the clone's own config. Only an --untracked-files on
+# the status command line overrides this; unsetting environment variables does
+# nothing, because the setting is committed to the clone's .git/config.
+setup_clone_untracked_suppressed_by_config() {
+  setup_clone_untracked "$1" || return 1
+  scratch_git -C "$1/tap-clone" config status.showUntrackedFiles no || return 1
+}
+
+# The same suppression arriving through the environment, which is how it reaches a
+# script run from a hook or a wrapper. Both halves of the fix stop the deletion, so
+# this case also requires the announcement, which only the unset produces.
+setup_clone_untracked_suppressed_by_env() { setup_clone_untracked "$1"; }
+
+case_env_suppress_untracked() { # <casedir>
+  printf 'GIT_CONFIG_COUNT=1\n'
+  printf 'GIT_CONFIG_KEY_0=status.showUntrackedFiles\n'
+  printf 'GIT_CONFIG_VALUE_0=no\n'
+}
+
+# An edit to a tracked file that git has been told not to stat. Neither `status` nor
+# `diff --quiet HEAD` reports it, so only the index-flag check sees it. The edit is
+# to the formula itself: the file the refresh overwrites first.
+setup_clone_assume_unchanged_edit() {
+  setup_tap_clone "$1" || return 1
+  scratch_git -C "$1/tap-clone" update-index --assume-unchanged Formula/rumdl.rb ||
+    return 1
+  printf '# a local edit git was told not to look for\n' \
+    >> "$1/tap-clone/Formula/rumdl.rb" || return 1
+  cp "$1/tap-clone/Formula/rumdl.rb" "$1/assume-unchanged-bytes.rb" || return 1
+}
+
+write_brew_stub() { # write_brew_stub <stubdir> <clonepath> [livecheck-json-file]
   # The clone's path is handed over in a file beside the stub, for the reason
   # write_curl_stub gives: interpolating it would break the stub on an apostrophe.
   printf '%s\n' "$2" > "$1/brew.repository"
+  # `brew livecheck --json` answers in JSON and exits 0 whether or not the block
+  # resolved anything, so the stub has to answer in JSON too: a stub that stayed
+  # silent would make every successful-refresh case refuse, and a stub that only
+  # exited 0 would let a validator that ignores the JSON pass.
+  if [ -n "${3:-}" ]; then
+    cp "$3" "$1/brew.livecheck" || return 1
+  else
+    cat > "$1/brew.livecheck" <<JSON
+[
+  {
+    "formula": "rumdl",
+    "version": {
+      "current": "$CUR_VERSION",
+      "latest": "$CUR_VERSION",
+      "outdated": false
+    }
+  }
+]
+JSON
+  fi
   cat > "$1/brew" <<'STUB'
 #!/bin/sh
 case "$1" in
   tap)          echo rvben/rumdl ;;
   --repository) cat "$(dirname "$0")/brew.repository" ;;
+  livecheck)    cat "$(dirname "$0")/brew.livecheck" ;;
   # Empty, so the `brew trust` call is skipped rather than stubbed into a
   # success it never had.
   commands)     ;;
@@ -749,6 +812,27 @@ esac
 exit 0
 STUB
   chmod +x "$1/brew"
+}
+
+# The shape brew returns for a livecheck block that resolves nothing: a status of
+# error, no version object at all, and exit 0. Taken from a real run against a
+# tapped formula whose strategy was pointed at a pattern that matches nothing.
+write_brew_livecheck_unresolved() { # <stubdir> <clonepath>
+  cat > "$1/livecheck-error.json" <<'JSON'
+[
+  {
+    "formula": "rumdl",
+    "status": "error",
+    "messages": [
+      "Unable to get versions"
+    ],
+    "meta": {
+      "livecheck_defined": true
+    }
+  }
+]
+JSON
+  write_brew_stub "$1" "$2" "$1/livecheck-error.json"
 }
 
 # A git that works, except that it cannot count commits - a corrupt clone, an
@@ -786,6 +870,10 @@ write_validator_stubs() { # write_validator_stubs <stubdir>
 
 stubs_validator()             { write_validator_stubs "$1"; write_brew_stub "$1" "${1%/stub}/tap-clone"; }
 stubs_validator_no_rev_list() { stubs_validator "$1"; write_git_stub_no_rev_list "$1"; }
+stubs_validator_livecheck_unresolved() {
+  write_validator_stubs "$1"
+  write_brew_livecheck_unresolved "$1" "${1%/stub}/tap-clone"
+}
 
 assert_clone_refreshed() { # <casedir>
   local want got
@@ -923,6 +1011,24 @@ assert_clone_untracked_kept() { # <casedir>
   done
 }
 
+# The bytes, not the dirtiness: git was told not to stat this file, so it is not
+# dirty by any measure git reports, and `reset --hard` overwrites it without
+# mentioning it. Comparing against the recorded copy is the only way to see the
+# loss, which is also why the script has to refuse instead of asking git.
+assert_clone_assume_unchanged_edit_kept() { # <casedir>
+  assert_clone_head_unmoved "$1" || return 1
+  if [ ! -f "$1/assume-unchanged-bytes.rb" ]; then
+    echo "harness: no copy of the assume-unchanged edit to compare against"
+    return 1
+  fi
+  if ! cmp -s "$1/assume-unchanged-bytes.rb" "$1/tap-clone/Formula/rumdl.rb"; then
+    echo "the clone's assume-unchanged edit was overwritten - git reports no change"
+    echo "for that path, so nothing else in this suite would notice:"
+    diff "$1/assume-unchanged-bytes.rb" "$1/tap-clone/Formula/rumdl.rb" | sed 's/^/  /'
+    return 1
+  fi
+}
+
 assert_clone_still_dirty() { # <casedir>
   assert_clone_head_unmoved "$1" || return 1
   if [ -z "$(scratch_git -C "$1/tap-clone" status --porcelain)" ]; then
@@ -951,13 +1057,29 @@ fail=0
 case_run() {
   local name="$1" want_code="$2" want_text="$3" script="$4"; shift 4
   local dir="$WORK/case-$((pass + fail + 1))"
-  mkdir -p "$dir/Formula" "$dir/scripts" "$dir/stub"
-  cat > "$dir/Formula/rumdl.rb"
-  # Kept so a case can assert the formula came out exactly as it went in, which is
-  # what every refusal in update-formula.sh actually promises.
-  cp "$dir/Formula/rumdl.rb" "$dir/original.rb"
-  cp scripts/verify-formula.sh scripts/update-formula.sh scripts/validate-formula.sh "$dir/scripts/"
-  chmod +x "$dir/scripts"/*.sh
+  # Building the fixture is the harness's job, so a failure here is not a guard
+  # failing - and left unchecked it would present as one. On a full disk or an
+  # unwritable TMPDIR the scripts never arrive, the run exits 127, and that is
+  # neither the expected code nor the expected message: every case reports FAIL,
+  # which is indistinguishable from the guards having regressed. Checked rather
+  # than trusted because this file deliberately runs without `set -e`, so nothing
+  # else stops a case built out of nothing from being counted.
+  #
+  # original.rb is kept so a case can assert the formula came out exactly as it went
+  # in, which is what every refusal in update-formula.sh actually promises.
+  if ! mkdir -p "$dir/Formula" "$dir/scripts" "$dir/stub" ||
+     ! cat > "$dir/Formula/rumdl.rb" ||
+     ! cp "$dir/Formula/rumdl.rb" "$dir/original.rb" ||
+     ! cp scripts/verify-formula.sh scripts/update-formula.sh \
+          scripts/validate-formula.sh "$dir/scripts/" ||
+     ! chmod +x "$dir/scripts"/*.sh; then
+    echo "HARNESS FAILURE: could not build the fixture for '$name'" >&2
+    echo "                 $dir" >&2
+    echo "                 Out of disk space, or that path is not writable. This is" >&2
+    echo "                 the harness failing, not a guard: a case whose scripts" >&2
+    echo "                 are missing exits 127 and reads as a rejected formula." >&2
+    exit 1
+  fi
 
   # Whatever the case needs on disk before the script runs: a git repository and a
   # clone of it, for the cases about the tap-clone refresh. A failure here is the
@@ -1054,20 +1176,20 @@ case_run() {
 echo "Guard tests (offline; downloads stubbed with local fixture assets)"
 echo
 
-# 1. The positive control. The unmodified formula must clear every structural
-#    check and reach the download stage, which this line marks. Without this a
-#    guard that rejected everything would pass every other case here.
+# The positive control. The unmodified formula must clear every structural
+# check and reach the download stage, which this line marks. Without this a
+# guard that rejected everything would pass every other case here.
 case_run "unmodified formula clears every structural check" any \
   "$DOWNLOAD_MARKER" verify-formula.sh < "$FORMULA"
 
-# 2. Arguments are rejected rather than ignored, so `verify-formula.sh 0.2.77`
-#    cannot report the committed version's pins as if they were 0.2.77's.
+# Arguments are rejected rather than ignored, so `verify-formula.sh 0.2.77`
+# cannot report the committed version's pins as if they were 0.2.77's.
 case_run "an argument is refused, not discarded" 2 \
   "takes no arguments" verify-formula.sh 0.2.77 < "$FORMULA"
 
-# 3. The four correct assets arranged in the wrong Hardware::CPU branches. Every
-#    other check in the script is satisfied by this formula, which hands Intel
-#    Macs an arm64-only binary.
+# The four correct assets arranged in the wrong Hardware::CPU branches. Every
+# other check in the script is satisfied by this formula, which hands Intel
+# Macs an arm64-only binary.
 python3 - "$FORMULA" <<'PY' > "$WORK/macswap.rb"
 import re, sys
 t = open(sys.argv[1]).read()
@@ -1084,22 +1206,22 @@ case_run "macOS pairs swapped between the intel and arm branches" 1 \
   "the macos:intel branch must carry x86_64-apple-darwin" \
   verify-formula.sh < "$WORK/macswap.rb"
 
-# 4. A platform dropped entirely. The url, sha256 and pair counts all stay in
-#    agreement, so no count check sees it. The expected-platform list is what
-#    rejects it, and the branch-exactly-once check further down independently
-#    rejects it too - verified by neutralising the list, which left the run
-#    failing on "does not declare each platform branch exactly once". That is why
-#    this case asserts the list's own message - and requires the backstop's message
-#    to be absent, because asserting a message is not the same as showing that the
-#    check owning it fired: the `echo` survives deleting the flag assignment beside
-#    it, and the backstop then refuses the formula with the same exit code.
+# A platform dropped entirely. The url, sha256 and pair counts all stay in
+# agreement, so no count check sees it. The expected-platform list is what
+# rejects it, and the branch-exactly-once check further down independently
+# rejects it too - verified by neutralising the list, which left the run
+# failing on "does not declare each platform branch exactly once". That is why
+# this case asserts the list's own message - and requires the backstop's message
+# to be absent, because asserting a message is not the same as showing that the
+# check owning it fired: the `echo` survives deleting the flag assignment beside
+# it, and the backstop then refuses the formula with the same exit code.
 #
-#    awk rather than `sed '/x86_64-apple-darwin/,+1d'`: the `,+N` address range is
-#    a GNU extension with no POSIX equivalent, and this suite runs on whatever sed
-#    the runner has. It does work on this macOS (Darwin 25.5 BSD sed deletes both
-#    lines), so nothing was broken - but a mutation that silently becomes a no-op
-#    on some other sed would feed the case an unmodified formula and blame the
-#    guard for accepting it, which is the failure assert_mutated exists to catch.
+# awk rather than `sed '/x86_64-apple-darwin/,+1d'`: the `,+N` address range is
+# a GNU extension with no POSIX equivalent, and this suite runs on whatever sed
+# the runner has. It does work on this macOS (Darwin 25.5 BSD sed deletes both
+# lines), so nothing was broken - but a mutation that silently becomes a no-op
+# on some other sed would feed the case an unmodified formula and blame the
+# guard for accepting it, which is the failure assert_mutated exists to catch.
 awk '
   /x86_64-apple-darwin/ { skip = 2 }
   skip > 0 { skip--; dropped++; next }
@@ -1118,8 +1240,8 @@ case_run "a platform removed with its pin" 1 \
   "does not ship the expected set of platforms" \
   verify-formula.sh < "$WORK/dropped.rb"
 
-# 5. A url pointing somewhere other than rumdl's releases. A host serving bytes
-#    that match the pin satisfies every hash check there is.
+# A url pointing somewhere other than rumdl's releases. A host serving bytes
+# that match the pin satisfies every hash check there is.
 sed 's|github.com/rvben/rumdl/releases|github.com/someone/else/releases|' "$FORMULA" > "$WORK/origin.rb"
 assert_mutated "$WORK/origin.rb"
 CASE_ASSERT=assert_refused_before_download
@@ -1127,8 +1249,8 @@ case_run "a url that does not fetch from rumdl's releases" 1 \
   "does not fetch from rumdl's own releases" \
   verify-formula.sh < "$WORK/origin.rb"
 
-# 6. A half-rewritten formula: one platform moved to a new release, the rest left
-#    behind. The version is scanned from the urls, so they have to agree.
+# A half-rewritten formula: one platform moved to a new release, the rest left
+# behind. The version is scanned from the urls, so they have to agree.
 awk -v cur="v$CUR_VERSION" -v other="v$OTHER_VERSION" '
   /^[[:space:]]*url "/ && /aarch64-unknown-linux-musl\.tar\.gz/ {
     n = gsub(cur, other)
@@ -1145,10 +1267,10 @@ case_run "urls naming two different versions" 1 \
   "name more than one version" \
   verify-formula.sh < "$WORK/mixed.rb"
 
-# 7. A url that sits in no CPU branch at all, so nothing decides which machine
-#    gets it. Removing the branch also leaves the branch counts wrong, so the
-#    backstop further down refuses this formula too - its message must stay absent
-#    for the refusal to be this check's.
+# A url that sits in no CPU branch at all, so nothing decides which machine
+# gets it. Removing the branch also leaves the branch counts wrong, so the
+# backstop further down refuses this formula too - its message must stay absent
+# for the refusal to be this check's.
 sed '/Hardware::CPU.intel?/d' "$FORMULA" > "$WORK/unbound.rb"
 assert_mutated "$WORK/unbound.rb"
 CASE_ASSERT=assert_refused_before_download
@@ -1157,9 +1279,9 @@ case_run "a url outside any Hardware::CPU branch" 1 \
   "sits in no recognised platform branch" \
   verify-formula.sh < "$WORK/unbound.rb"
 
-# 8. A sha256 with no url above it. The url/sha/pair counts can still agree on
-#    this, which is how it once reached the download loop and was reported as a
-#    malformed pin instead of a malformed formula.
+# A sha256 with no url above it. The url/sha/pair counts can still agree on
+# this, which is how it once reached the download loop and was reported as a
+# malformed pin instead of a malformed formula.
 python3 - "$FORMULA" <<'PY' > "$WORK/unpaired.rb"
 import re, sys
 t = open(sys.argv[1]).read()
@@ -1185,10 +1307,10 @@ case_run "a sha256 with no url above it" 1 \
   verify-formula.sh < "$WORK/unpaired.rb"
 
 # 9-10. The pin-format check, which unlike every check above runs inside the
-#    download loop - so its case cannot rest on the exit code, because a failed
-#    download produces the same one. Both cases here run against a formula pinned
-#    to the fixture assets, where the downloads succeed and the hashes match, so
-#    the only thing left that can fail the run is the check under test.
+# download loop - so its case cannot rest on the exit code, because a failed
+# download produces the same one. Both cases here run against a formula pinned
+# to the fixture assets, where the downloads succeed and the hashes match, so
+# the only thing left that can fail the run is the check under test.
 fixture_pinned_formula "$WORK/fixture-pinned.rb" || {
   echo "HARNESS FAILURE: could not build a formula pinned to the fixture assets." >&2
   echo "                 The pin-format cases would then rest on a failed download," >&2
@@ -1196,19 +1318,20 @@ fixture_pinned_formula "$WORK/fixture-pinned.rb" || {
   exit 1
 }
 
-# 9. The positive control for it: the verifier must be able to SUCCEED. Nothing
-#    else here shows that - the committed pins are the real published assets'
-#    hashes, which no fixture can serve, so case 1 can only require that the run
-#    reaches the download stage. Without this, a verifier that failed every
-#    formula would pass every other verifier case in this suite.
+# The positive control for it: the verifier must be able to SUCCEED. Nothing
+# else here shows that - the committed pins are the real published assets'
+# hashes, which no fixture can serve, so the unmodified-formula case can only
+# require that the run reaches the download stage. Without this, a verifier
+# that failed every
+# formula would pass every other verifier case in this suite.
 CASE_STUBS=stubs_verifier
 case_run "a formula pinned to the bytes its urls fetch verifies clean" 0 \
   "All 4 pins match the artifacts their urls fetch, at version $CUR_VERSION" \
   verify-formula.sh < "$WORK/fixture-pinned.rb"
 
-# 10. And one pin replaced by a placeholder, which is what a half-finished update
-#     leaves behind. Three assets still verify, so the run is proved to have got
-#     through the loop: what fails it is the pin's format and nothing else.
+# And one pin replaced by a placeholder, which is what a half-finished update
+# leaves behind. Three assets still verify, so the run is proved to have got
+# through the loop: what fails it is the pin's format and nothing else.
 FIXTURE_FIRST_SHA="$(sed -n 's/^[[:space:]]*sha256 "\([^"]*\)".*/\1/p' "$WORK/fixture-pinned.rb" | head -1)"
 
 # "64 hex characters" is two requirements, and one bad pin can only test one of
@@ -1242,8 +1365,8 @@ case_run "a hexadecimal pin that is not 64 characters" 1 \
   verify-formula.sh < "$WORK/pin-short.rb"
 
 # 10-12. The updater's version guard. It reaches curl, a url and the formula
-#    text, and the value arrives from a repository_dispatch payload. Run with
-#    ALLOW_UNATTESTED=1 so the checks under test are reached without a gh login.
+# text, and the value arrives from a repository_dispatch payload. Run with
+# ALLOW_UNATTESTED=1 so the checks under test are reached without a gh login.
 export ALLOW_UNATTESTED=1
 
 case_run "a version that is not a version" 2 \
@@ -1270,66 +1393,66 @@ case_run "moving the tap to an older version" 1 \
   "Refusing to move the tap backwards" update-formula.sh "$OLDER_VERSION" < "$WORK/back-version.rb"
 
 # 13-17. The updater past its structural checks, where what gets pinned is
-#    actually decided. Downloads succeed from here on, so ALLOW_UNATTESTED must go:
-#    leaving it exported would skip the provenance loop in every case below,
-#    including the one whose whole subject is provenance.
+# actually decided. Downloads succeed from here on, so ALLOW_UNATTESTED must go:
+# leaving it exported would skip the provenance loop in every case below,
+# including the one whose whole subject is provenance.
 unset ALLOW_UNATTESTED
 
-# 13. The positive control for the updater, and the counterpart to case 1. A
-#     script that refused every version, or wrote hashes in the wrong order, or
-#     wrote the first hash into all four pins, passes cases 10-12 and 14-17 and
-#     fails only here.
+# The positive control for the updater, and the counterpart to the
+# unmodified-formula case. A script that refused every version, or wrote hashes in
+# the wrong order, or wrote the first hash into all four pins, passes every other
+# updater case here and fails only this one.
 CASE_STUBS=stubs_attested
 CASE_ASSERT=assert_pinned_to_other
 case_run "a full update pins each url to the bytes that url fetched" 0 \
   "All 4 pins match the artifacts their urls fetch, at version $OTHER_VERSION" \
   update-formula.sh "$OTHER_VERSION" < "$FORMULA"
 
-# 14. An asset that downloads cleanly and carries no build provenance. The hash
-#     would be perfectly self-consistent - it is the hash of what the url served -
-#     which is exactly why the attestation is checked before pinning rather than
-#     the hash being taken as sufficient.
+# An asset that downloads cleanly and carries no build provenance. The hash
+# would be perfectly self-consistent - it is the hash of what the url served -
+# which is exactly why the attestation is checked before pinning rather than
+# the hash being taken as sufficient.
 #
-#     The first asset here IS attested and a later one is not, because the release
-#     has four assets and the check sits in a loop: a stub refusing all four cannot
-#     tell "every asset is checked" from "the first asset is checked", since the
-#     loop stops on asset 1 under either. Checking only the first left this case
-#     passing while three platforms were pinned unverified. Which asset is refused
-#     is asserted too: a check reading provenance the wrong way round refuses the
-#     attested one, with the same exit code and the same message.
+# The first asset here IS attested and a later one is not, because the release has
+# four assets and the check sits in a loop: a stub refusing all four cannot tell
+# "every asset is checked" from "the first asset is checked", since the loop stops
+# on the first asset under either. Checking only the first left this case passing
+# while three platforms were pinned unverified. Which asset is refused is asserted
+# too: a check reading provenance the wrong way round refuses the attested one,
+# with the same exit code and the same message.
 CASE_STUBS=stubs_attested_first_only
 CASE_ASSERT=assert_first_asset_cleared_provenance
 case_run "an asset with no build provenance is refused, not pinned" 1 \
   "has no valid build provenance from rvben/rumdl" \
   update-formula.sh "$OTHER_VERSION" < "$FORMULA"
 
-# 15. An asset that IS attested, by a workflow that is not rumdl's release
-#     workflow. Provenance alone does not say who built the bytes: anyone can
-#     attest their own build from their own workflow, so what makes the check mean
-#     "rumdl built this" is --signer-workflow. This stub answers as GitHub would
-#     for such an asset - it finds an attestation when asked without the flag and
-#     none when asked with it - so dropping the flag accepts the asset and fails
-#     this case, while every other provenance case still passes.
+# An asset that IS attested, by a workflow that is not rumdl's release
+# workflow. Provenance alone does not say who built the bytes: anyone can
+# attest their own build from their own workflow, so what makes the check mean
+# "rumdl built this" is --signer-workflow. This stub answers as GitHub would
+# for such an asset - it finds an attestation when asked without the flag and
+# none when asked with it - so dropping the flag accepts the asset and fails
+# this case, while every other provenance case still passes.
 CASE_STUBS=stubs_attested_wrong_signer
 CASE_ASSERT=assert_formula_untouched
 case_run "an asset attested by the wrong workflow is refused" 1 \
   "has no valid build provenance from rvben/rumdl" \
   update-formula.sh "$OTHER_VERSION" < "$FORMULA"
 
-# 15. The v0.2.76 case itself: the formula already names this version, and the
-#     published assets now hash differently. Every pin computed here is genuine
-#     and attested, so nothing else in the chain objects - this guard is the only
-#     thing that turns "the release was re-run" into a decision rather than a
-#     silent change of what users install under a version they already have.
+# The v0.2.76 case itself: the formula already names this version, and the
+# published assets now hash differently. Every pin computed here is genuine
+# and attested, so nothing else in the chain objects - this guard is the only
+# thing that turns "the release was re-run" into a decision rather than a
+# silent change of what users install under a version they already have.
 CASE_STUBS=stubs_attested
 CASE_ASSERT=assert_formula_untouched
 case_run "the same version with changed assets needs ALLOW_REPIN" 1 \
   "the assets for v$CUR_VERSION have changed since the formula was pinned" \
   update-formula.sh "$CUR_VERSION" < "$FORMULA"
 
-# 16. And the escape hatch works, so the guard above is a gate rather than a dead
-#     end. Re-pins the version the formula already names to the assets published
-#     now, which is what the operator asked for.
+# And the escape hatch works, so the guard above is a gate rather than a dead
+# end. Re-pins the version the formula already names to the assets published
+# now, which is what the operator asked for.
 export ALLOW_REPIN=1
 CASE_STUBS=stubs_attested
 CASE_ASSERT=assert_repinned_to_cur
@@ -1338,12 +1461,12 @@ case_run "ALLOW_REPIN=1 re-pins the version already named" 0 \
   update-formula.sh "$CUR_VERSION" < "$FORMULA"
 unset ALLOW_REPIN
 
-# 17. An asset replaced between pinning and verifying: the four downloads that get
-#     pinned succeed, and the four the verification makes return different bytes.
-#     The formula has already been rewritten by then, so the requirement is not
-#     just that the run fails but that it leaves the working tree as it found it.
-#     Without the restore, the next thing to read the formula - including the
-#     commit step in update-formula.yml - takes those unverified pins as current.
+# An asset replaced between pinning and verifying: the four downloads that get
+# pinned succeed, and the four the verification makes return different bytes.
+# The formula has already been rewritten by then, so the requirement is not
+# just that the run fails but that it leaves the working tree as it found it.
+# Without the restore, the next thing to read the formula - including the
+# commit step in update-formula.yml - takes those unverified pins as current.
 CASE_STUBS=stubs_replaced_midway
 CASE_ASSERT=assert_formula_untouched
 case_run "a verification failure after the write restores the formula" 1 \
@@ -1351,86 +1474,133 @@ case_run "a verification failure after the write restores the formula" 1 \
   update-formula.sh "$OTHER_VERSION" < "$FORMULA"
 
 # 18-22. validate-formula.sh's tap-clone refresh: the only data-destroying pair of
-#    commands in this repository, and the check that permits them. Each case gets a
-#    real checkout and a real clone of it, and each asserts what the clone still
-#    holds afterwards - the exit code says the guard fired, not that the work
-#    survived.
+# commands in this repository, and the check that permits them. Each case gets a
+# real checkout and a real clone of it, and each asserts what the clone still
+# holds afterwards - the exit code says the guard fired, not that the work
+# survived.
 
-# 18. The positive control, and the reason the refresh exists at all: `brew tap
-#     --force` on an already-tapped name does nothing, so without this the brew
-#     checks would read whatever commit the clone happened to be on.
+# The positive control, and the reason the refresh exists at all: `brew tap
+# --force` on an already-tapped name does nothing, so without this the brew
+# checks would read whatever commit the clone happened to be on.
 CASE_SETUP=setup_clone_clean
 CASE_STUBS=stubs_validator
 CASE_ASSERT=assert_clone_refreshed_and_quiet
 case_run "a clean tap clone is moved to the checkout's HEAD" 0 \
   "tap clone now at" validate-formula.sh < "$FORMULA"
 
-# 19. Uncommitted changes in the clone, which is exactly what `brew edit
-#     rvben/rumdl/rumdl` leaves behind.
+# Uncommitted changes in the clone, which is exactly what `brew edit
+# rvben/rumdl/rumdl` leaves behind.
 CASE_SETUP=setup_clone_dirty
 CASE_STUBS=stubs_validator
 CASE_ASSERT=assert_clone_still_dirty
 case_run "a tap clone with uncommitted changes is not discarded" 1 \
   "holds work this would destroy" validate-formula.sh < "$FORMULA"
 
-# 20. Untracked files and an untracked directory in the clone. A separate case
-#     from 19 because the two are found by different things: a modified tracked
-#     file shows in `status` however it is invoked, while untracked files need
-#     `status` to be asked about them and are what `clean -fd` deletes. Dropping
-#     them from the check, or cleaning before deciding, left every other case
-#     passing while a contributor's unversioned notes were gone for good.
+# Untracked files and an untracked directory in the clone. A separate case from the
+# uncommitted-changes one because the two are found by different things: a modified
+# tracked file shows in `status` however it is invoked, while untracked files need
+# `status` to be asked about them and are what `clean -fd` deletes. Dropping
+# them from the check, or cleaning before deciding, left every other case
+# passing while a contributor's unversioned notes were gone for good.
 CASE_SETUP=setup_clone_untracked
 CASE_STUBS=stubs_validator
 CASE_ASSERT=assert_clone_untracked_kept
 case_run "a tap clone's untracked files are not cleaned away" 1 \
   "holds work this would destroy" validate-formula.sh < "$FORMULA"
 
-# 21. A commit the checkout does not have. Nothing shows as dirty, so only the
-#     ahead-count sees it.
+# A commit the checkout does not have. Nothing shows as dirty, so only the
+# ahead-count sees it.
 CASE_SETUP=setup_clone_ahead
 CASE_STUBS=stubs_validator
 CASE_ASSERT=assert_clone_kept_its_commit
 case_run "a tap clone holding its own commit is not reset" 1 \
   "commit(s) not in" validate-formula.sh < "$FORMULA"
 
-# 22. And the ahead-count failing to answer. This is the one that was wrong: a
-#     `rev-list` that could not run was coerced to 0, which with a clean worktree
-#     skipped both refusals and ran reset --hard on the very commits it could not
-#     count. The assertion is that the clone's own commit is still there, so this
-#     case fails against the previous version of the script rather than merely
-#     asserting the new message.
+# And the ahead-count failing to answer. This is the one that was wrong: a
+# `rev-list` that could not run was coerced to 0, which with a clean worktree
+# skipped both refusals and ran reset --hard on the very commits it could not
+# count. The assertion is that the clone's own commit is still there, so this
+# case fails against the previous version of the script rather than merely
+# asserting the new message.
 CASE_SETUP=setup_clone_ahead
 CASE_STUBS=stubs_validator_no_rev_list
 CASE_ASSERT=assert_clone_kept_its_commit
 case_run "a tap clone whose commits cannot be counted is not reset" 1 \
   "could not count commits" validate-formula.sh < "$FORMULA"
 
-# 25. The formula edited and not committed. The pin check reads the working tree
-#     and the brew checks read a clone at HEAD, so this run validates two
-#     different formulae and says so nowhere: the edit collects a clean audit, a
-#     passing test and a closing "all checks passed" from checks that never saw
-#     it. Whoever ran it then pushes on the strength of that.
+# The formula edited and not committed. The pin check reads the working tree
+# and the brew checks read a clone at HEAD, so this run validates two
+# different formulae and says so nowhere: the edit collects a clean audit, a
+# passing test and a closing "all checks passed" from checks that never saw
+# it. Whoever ran it then pushes on the strength of that.
 CASE_SETUP=setup_clone_uncommitted_formula
 CASE_STUBS=stubs_validator
 CASE_ASSERT=assert_said_the_edit_was_not_audited
 case_run "an uncommitted formula edit is reported as unaudited" 0 \
   "tap clone now at" validate-formula.sh < "$FORMULA"
 
-# 26. A git repository override inherited from the environment. git exports GIT_DIR
-#     to every hook it runs, and this script is the repository's one-command local
-#     gate, so a pre-push hook that calls it is the obvious way to make it
-#     automatic. `git -C <dir>` does not override GIT_DIR, so without the script
-#     clearing it, the check that decides whether refreshing the tap clone would
-#     destroy work inspects a different repository entirely - and answers "nothing
-#     to lose" about a clone it never looked at. The clone here is clean, so the
-#     evidence is the refresh landing on the right repository rather than a
-#     refusal, which any mistake would also produce.
+# A git repository override inherited from the environment. git exports GIT_DIR
+# to every hook it runs, and this script is the repository's one-command local
+# gate, so a pre-push hook that calls it is the obvious way to make it
+# automatic. `git -C <dir>` does not override GIT_DIR, so without the script
+# clearing it, the check that decides whether refreshing the tap clone would
+# destroy work inspects a different repository entirely - and answers "nothing
+# to lose" about a clone it never looked at. The clone here is clean, so the
+# evidence is the refresh landing on the right repository rather than a
+# refusal, which any mistake would also produce.
 CASE_SETUP=setup_clone_decoy_repo
 CASE_ENV=case_env_decoy_repo
 CASE_STUBS=stubs_validator
 CASE_ASSERT=assert_clone_refreshed_and_decoy_untouched
 case_run "an inherited GIT_DIR does not redirect the tap-clone checks" 0 \
   "Clearing inherited git repository overrides" validate-formula.sh < "$FORMULA"
+
+# Three more ways the inventory in front of `reset --hard` and `clean -fd` comes
+# back empty on a clone that holds work. None of them is an error state: git is
+# being asked a narrower question than the one the answer gets used for, and it
+# answers the narrow question correctly.
+#
+# The clone's own config suppressing untracked files. The case above covers
+# untracked files; this covers being unable to see them, a different failure with
+# the same consequence, and the refusal message is the same one either way - so
+# the assertion that carries this case is the files still being there.
+CASE_SETUP=setup_clone_untracked_suppressed_by_config
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_clone_untracked_kept
+case_run "untracked files hidden by the clone's own config are not cleaned away" 1 \
+  "holds work this would destroy" validate-formula.sh < "$FORMULA"
+
+# The same suppression inherited from the environment, the form it takes when this
+# script runs from a hook or a wrapper. Requiring the announcement as well pins
+# which half of the fix answered: the status flag alone would refuse silently.
+CASE_SETUP=setup_clone_untracked_suppressed_by_env
+CASE_ENV=case_env_suppress_untracked
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_clone_untracked_kept
+case_run "an inherited GIT_CONFIG_COUNT cannot hide the clone's untracked files" 1 \
+  "Clearing inherited git repository overrides" validate-formula.sh < "$FORMULA"
+
+# A tracked file marked assume-unchanged and then edited. git reports no change for
+# it anywhere - not `status`, not `diff --quiet HEAD` - so every other assertion in
+# this suite passes while `reset --hard` overwrites the edit. Whether those paths
+# hold edits is unknown rather than known-clean, and unknown immediately before a
+# destructive command has to stop the run.
+CASE_SETUP=setup_clone_assume_unchanged_edit
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_clone_assume_unchanged_edit_kept
+case_run "a tracked edit git was told not to stat is not overwritten" 1 \
+  "assume-unchanged or skip-worktree" validate-formula.sh < "$FORMULA"
+
+# The formula's livecheck block resolving nothing. This is the block that tells a
+# maintainer a new rumdl release exists, and a broken one is invisible: `brew audit`
+# and `brew style` both accept it, and `brew livecheck` reports the failure in its
+# JSON while exiting 0. So the validator has to read the JSON, and a stub that exits
+# 0 with an error body is the only way to show that it does. The clone here is clean
+# and the refresh succeeds, so the refusal can only come from the livecheck check.
+CASE_SETUP=setup_clone_clean
+CASE_STUBS=stubs_validator_livecheck_unresolved
+case_run "a livecheck block that resolves nothing is refused" 1 \
+  "livecheck block resolved no version" validate-formula.sh < "$FORMULA"
 
 echo
 if [ "$fail" -ne 0 ]; then
