@@ -655,6 +655,15 @@ setup_clone_ahead() {
   scratch_git -C "$1/tap-clone" rev-parse HEAD > "$1/clone-head.txt"
 }
 
+# The checkout's formula edited and not committed, which is the state anyone
+# validating an edit locally is in. The pin check reads the working tree, the brew
+# checks read a clone at HEAD, so the edit is not the formula brew audits,
+# installs or tests - while every line the run prints says those checks passed.
+setup_clone_uncommitted_formula() {
+  setup_tap_clone "$1" || return 1
+  printf '# an edit that was never committed\n' >> "$1/Formula/rumdl.rb" || return 1
+}
+
 write_brew_stub() { # write_brew_stub <stubdir> <clonepath>
   # The clone's path is handed over in a file beside the stub, for the reason
   # write_curl_stub gives: interpolating it would break the stub on an apostrophe.
@@ -746,6 +755,34 @@ assert_clone_refreshed() { # <casedir>
     printf '%s\n' "$residue" | sed 's/^/  /'
     return 1
   fi
+}
+
+# The clean case's second bound. A warning printed unconditionally would satisfy
+# the uncommitted case below while telling everyone who commits first that their
+# formula was not audited, so the ordinary run has to be shown staying quiet.
+assert_clone_refreshed_and_quiet() { # <casedir>
+  assert_clone_refreshed "$1" || return 1
+  if grep -q 'differs from HEAD' "$1/out.txt"; then
+    echo "the formula is committed and the clone is at that commit, so brew read"
+    echo "exactly the formula the pin check read - but the run warned that it did"
+    echo "not:"
+    sed 's/^/  /' "$1/out.txt" | head -8
+    return 1
+  fi
+}
+
+# Two statements, and the case needs both: the warning where the split happens,
+# and the same fact in the closing report, which is the line that gets read.
+assert_said_the_edit_was_not_audited() { # <casedir>
+  local pat
+  for pat in 'differs from HEAD' 'was NOT audited'; do
+    if ! grep -q "$pat" "$1/out.txt"; then
+      echo "the run reported pins, audit and style passing without saying that the"
+      echo "formula brew read is HEAD's, not the edited one (no \"$pat\"):"
+      sed 's/^/  /' "$1/out.txt" | tail -8
+      return 1
+    fi
+  done
 }
 
 assert_clone_kept_its_commit() { # <casedir>
@@ -1169,7 +1206,7 @@ case_run "a verification failure after the write restores the formula" 1 \
 #     checks would read whatever commit the clone happened to be on.
 CASE_SETUP=setup_clone_clean
 CASE_STUBS=stubs_validator
-CASE_ASSERT=assert_clone_refreshed
+CASE_ASSERT=assert_clone_refreshed_and_quiet
 case_run "a clean tap clone is moved to the checkout's HEAD" 0 \
   "tap clone now at" validate-formula.sh < "$FORMULA"
 
@@ -1212,6 +1249,17 @@ CASE_STUBS=stubs_validator_no_rev_list
 CASE_ASSERT=assert_clone_kept_its_commit
 case_run "a tap clone whose commits cannot be counted is not reset" 1 \
   "could not count commits" validate-formula.sh < "$FORMULA"
+
+# 25. The formula edited and not committed. The pin check reads the working tree
+#     and the brew checks read a clone at HEAD, so this run validates two
+#     different formulae and says so nowhere: the edit collects a clean audit, a
+#     passing test and a closing "all checks passed" from checks that never saw
+#     it. Whoever ran it then pushes on the strength of that.
+CASE_SETUP=setup_clone_uncommitted_formula
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_said_the_edit_was_not_audited
+case_run "an uncommitted formula edit is reported as unaudited" 0 \
+  "tap clone now at" validate-formula.sh < "$FORMULA"
 
 echo
 if [ "$fail" -ne 0 ]; then

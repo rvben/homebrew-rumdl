@@ -83,12 +83,34 @@ echo "==> Every sha256 is the hash of the artifact its url fetches"
 scripts/verify-formula.sh
 echo
 
+# Which formula the brew checks are about to read. Everything above read the
+# working tree; everything below reads a CLONE of this repository at HEAD, and
+# those are the same bytes only while the formula is committed. The difference is
+# invisible in the output otherwise: an uncommitted install stanza collects a
+# clean `brew audit`, a passing `brew test` and a final "all checks passed" line
+# from a run that never looked at it. So the run says which tree answered, and
+# says so again at the end, where the claim is made.
+HEAD_SHA=""
+FORMULA_UNCOMMITTED=0
+if git -C "$TAP_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+  HEAD_SHA="$(git -C "$TAP_DIR" rev-parse --short HEAD)"
+  # `diff HEAD` covers staged and unstaged alike; `ls-files --error-unmatch`
+  # covers the formula being untracked, which `diff` reports as no difference.
+  if ! git -C "$TAP_DIR" ls-files --error-unmatch Formula/rumdl.rb >/dev/null 2>&1 ||
+     ! git -C "$TAP_DIR" diff --quiet HEAD -- Formula/rumdl.rb; then
+    FORMULA_UNCOMMITTED=1
+  fi
+fi
+if [ "$FORMULA_UNCOMMITTED" -eq 1 ]; then
+  echo "==> WARNING: Formula/rumdl.rb differs from HEAD ($HEAD_SHA)"
+  echo "    The pin check above read your working tree. Every brew check below"
+  echo "    reads a clone of this repository at HEAD, so your edit is NOT what"
+  echo "    brew audits, installs or tests. Commit it first to validate it."
+  echo
+fi
+
 # brew audit/style need the formula to be reachable as a tap. This changes local
 # Homebrew state, which is why it happens after the check that does not.
-#
-# Note for anyone validating an edit locally: this CLONES the repository, so the
-# brew checks below see HEAD, not the working tree. Commit first if you want brew
-# to see your change. The pin check above reads the working tree directly.
 if brew tap | grep -qx rvben/rumdl; then
   # Already tapped, which is the normal state for anyone who has run this before.
   # `brew tap --force` does nothing whatsoever here - Homebrew rescues
@@ -175,7 +197,13 @@ brew audit --strict --online rvben/rumdl/rumdl
 echo
 
 if [ "$WITH_INSTALL" -eq 0 ]; then
-  echo "Pins, audit and style pass. Install and test not run; pass --install for those."
+  echo "Pins pass against this working tree. Audit and style pass against ${HEAD_SHA:-HEAD}."
+  # Spelled as an `if`: a bare `[ ... ] && echo` is a statement that returns 1
+  # when the test is false, which under `set -e` ends the run here.
+  if [ "$FORMULA_UNCOMMITTED" -eq 1 ]; then
+    echo "Your uncommitted Formula/rumdl.rb was NOT audited. Commit it and re-run."
+  fi
+  echo "Install and test not run; pass --install for those."
   exit 0
 fi
 
@@ -326,4 +354,9 @@ echo "==> The installed binary lints this repository's own docs"
 "$RUMDL" check --no-config README.md CONTRIBUTING.md
 echo
 
-echo "All checks passed, install and test included."
+echo "Pins pass against this working tree. Audit, style, install and test pass"
+echo "against ${HEAD_SHA:-HEAD}, which is what brew read."
+if [ "$FORMULA_UNCOMMITTED" -eq 1 ]; then
+  echo "Your uncommitted Formula/rumdl.rb was NOT installed or tested. Commit it"
+  echo "and re-run: nothing below the pin check looked at it."
+fi
