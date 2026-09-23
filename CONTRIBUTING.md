@@ -81,14 +81,18 @@ passes both before and after proves nothing.
 ## Validating locally
 
 ```bash
-./scripts/validate-formula.sh            # guards, pins, audit, style, strict audit
+./scripts/validate-formula.sh            # lint, guards, pins, audit, style
 ./scripts/validate-formula.sh --install  # also install, test, lint these docs
 ```
 
-This runs what CI runs, in the same order, `scripts/test-guards.sh` included, so
-a guard-script regression cannot pass locally and fail only in CI. Two things to
-know:
+This runs what CI runs, in the same order, `shellcheck` and
+`scripts/test-guards.sh` included, so a guard-script regression cannot pass
+locally and fail only in CI. Three things to know:
 
+- A clean `shellcheck` here is not a promise of a clean one in CI. The runner
+  ships 0.9.0, a Homebrew machine currently has 0.11.0, and the older version is
+  the stricter of the two: it rejected an `A && B || C` line that the newer one
+  accepted silently. CI is the authority.
 - `brew tap --force rvben/rumdl <path>` clones the repository, so the `brew`
   checks see `HEAD`, not your uncommitted changes. Commit first if you want brew
   to see your edit. The pin check at the start reads the working tree directly,

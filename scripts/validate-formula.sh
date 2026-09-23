@@ -32,6 +32,24 @@ command -v brew >/dev/null 2>&1 || {
   exit 1
 }
 
+# First, in CI's order. Every check in this repository is a shell script, so a
+# shell defect is a guard defect.
+#
+# Version drift is real here and CI is the authority: the runner ships shellcheck
+# 0.9.0, a Homebrew machine currently has 0.11.0, and the older one is the stricter
+# of the two - 0.9.0 rejected an `A && B || C` line that 0.11.0 accepted silently,
+# which is a lint that passes locally and fails in CI. So a clean run here is not a
+# promise of a clean `pins` job on an older shellcheck.
+echo "==> The scripts are free of shell defects"
+command -v shellcheck >/dev/null 2>&1 || {
+  echo "error: shellcheck is not installed, and CI runs it over every script." >&2
+  echo "       brew install shellcheck" >&2
+  exit 1
+}
+shellcheck --version | sed -n 2p
+shellcheck scripts/*.sh
+echo
+
 # Before the check, the checker - the same order as CI's `pins` job, because this
 # script claims to run what CI runs and a guard-script regression that only CI
 # catches makes that claim false. Offline and hermetic, so it costs seconds.
@@ -66,10 +84,14 @@ if brew tap | grep -qx rvben/rumdl; then
   # uninstall the machine's rumdl to get its way - verified on Linux, where the
   # untap approach aborted the run before it installed anything.
   tap_repo="$(brew --repository rvben/rumdl)"
-  [ -n "$tap_repo" ] && [ -d "$tap_repo/.git" ] || {
+  # Spelled as an `if` rather than `A && B || C`, which shellcheck 0.9.0 on the
+  # runner flags as SC2015 while a newer local shellcheck stays quiet. The logic
+  # was correct either way; a lint that passes locally and fails in CI is the
+  # thing worth removing.
+  if [ -z "$tap_repo" ] || [ ! -d "$tap_repo/.git" ]; then
     echo "error: rvben/rumdl is tapped but $tap_repo is not a git clone" >&2
     exit 1
-  }
+  fi
   echo "==> Refreshing the existing rvben/rumdl tap clone from $TAP_DIR"
   git -C "$tap_repo" fetch --quiet "$TAP_DIR" HEAD
 
