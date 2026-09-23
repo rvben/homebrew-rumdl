@@ -910,6 +910,31 @@ setup_clone_ignored_dir_collision() {
   cp "$1/tap-clone/notes/private" "$1/hidden-bytes" || return 1
 }
 
+# A clone carrying its own post-checkout hook. Not a collision case: the point is that
+# refreshing the clone must not EXECUTE anything the clone brought with it. `reset --hard`
+# ran no hooks, so switching the refresh to `checkout` started running them, and a hook
+# gets to act after the inventory has finished deciding what may be touched - it can edit
+# the tracked formula the brew checks are about to read, and it can create files that the
+# `clean -qfd` after the refresh then deletes.
+#
+# The marker goes OUTSIDE the clone, two ways round: a hook that only wrote inside it
+# would have its evidence deleted by that very clean, and the case would pass whether or
+# not the hook ran. Written with a relative path rather than by interpolating the case
+# directory, for the reason write_brew_stub gives below - a path can contain an
+# apostrophe - and because git runs a post-checkout hook from the top of the working
+# tree, which makes `../hook-ran` the case directory.
+setup_clone_post_checkout_hook() {
+  setup_tap_clone "$1" || return 1
+  mkdir -p "$1/tap-clone/.git/hooks" || return 1
+  cat > "$1/tap-clone/.git/hooks/post-checkout" <<'HOOK' || return 1
+#!/bin/sh
+printf 'ran\n' > ../hook-ran
+printf 'the hook replaced the formula after the inventory ran\n' > Formula/rumdl.rb
+printf 'and created this, for the clean to delete\n' > hook-made-this.txt
+HOOK
+  chmod +x "$1/tap-clone/.git/hooks/post-checkout" || return 1
+}
+
 write_brew_stub() { # write_brew_stub <stubdir> <clonepath> [livecheck-json-file]
   # The clone's path is handed over in a file beside the stub, for the reason
   # write_curl_stub gives: interpolating it would break the stub on an apostrophe.
@@ -1061,6 +1086,25 @@ assert_clone_refreshed_and_quiet() { # <casedir>
     sed 's/^/  /' "$1/out.txt" | head -8
     return 1
   fi
+}
+
+# The refresh completed AND ran none of the clone's own hooks. Both halves, because
+# either alone is satisfiable by the wrong thing: suppressing hooks by failing to
+# refresh at all would pass a marker-only check, and a refresh that ran the hook still
+# reaches the checkout's HEAD. `assert_clone_refreshed` covers the damage a hook does
+# (it replaces the formula, and it is checked against the checkout's copy and for a
+# clean tree); the marker covers the hook having run at all, including a hook whose
+# only effect was outside the clone or was cleaned away afterwards.
+assert_clone_refreshed_and_hooks_unrun() { # <casedir>
+  local bad=0
+  assert_clone_refreshed "$1" || bad=1
+  if [ -f "$1/hook-ran" ]; then
+    echo "the clone's own post-checkout hook executed during the refresh, so the"
+    echo "clone got to run code after the inventory decided what may be touched:"
+    sed 's/^/  /' "$1/hook-ran"
+    bad=1
+  fi
+  return "$bad"
 }
 
 # The refresh happened to the tap clone AND not to the repository GIT_DIR named.
@@ -1817,6 +1861,17 @@ else
   case_run "an ignored file differing only in case is a different file, and survives" \
     0 "tap clone now at" validate-formula.sh < "$FORMULA"
 fi
+
+# A hook the clone brought with it. The refresh is allowed to move this clone; it is not
+# allowed to run its code. `reset --hard` ran no hooks, so this case exists because the
+# fix above - handing the collision check to `checkout` - would otherwise have handed the
+# clone an execution point as well, one that lands after the inventory and before the
+# brew checks.
+CASE_SETUP=setup_clone_post_checkout_hook
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_clone_refreshed_and_hooks_unrun
+case_run "the tap clone's own post-checkout hook is not run by the refresh" 0 \
+  "tap clone now at" validate-formula.sh < "$FORMULA"
 
 # The formula's livecheck block resolving nothing. This is the block that tells a
 # maintainer a new rumdl release exists, and a broken one is invisible: `brew audit`

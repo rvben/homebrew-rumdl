@@ -294,14 +294,25 @@ if brew tap | grep -qx rvben/rumdl; then
   #
   # -B rather than --detach so the clone stays on its branch, which is the state brew
   # expects; a clone already detached is refreshed detached.
+  #
+  # `core.hooksPath` emptied because checkout runs hooks and `reset --hard` does not,
+  # so the change above would otherwise have started executing the clone's own
+  # `post-checkout` and `reference-transaction` hooks. Measured: with hooks live, a
+  # post-checkout hook ran and edited a tracked file in the clone, which is the
+  # formula the brew checks below then read while this script announced the fetched
+  # commit; the `clean -qfd` after it also deleted a file that hook had created,
+  # after the inventory that was supposed to decide whether anything here may be
+  # deleted. /dev/null is not a directory, so git finds no hook and says nothing.
+  # The `fetch` above needs no such treatment: it writes only FETCH_HEAD, and a
+  # reference-transaction hook was measured not to fire for it.
   tap_branch="$(git -C "$tap_repo" symbolic-ref --quiet --short HEAD || true)"
   refresh_code=0
   if [ -n "$tap_branch" ]; then
-    refresh_out="$(git -C "$tap_repo" checkout --quiet --no-overwrite-ignore \
-      -B "$tap_branch" FETCH_HEAD 2>&1)" || refresh_code=$?
+    refresh_out="$(git -C "$tap_repo" -c core.hooksPath=/dev/null checkout --quiet \
+      --no-overwrite-ignore -B "$tap_branch" FETCH_HEAD 2>&1)" || refresh_code=$?
   else
-    refresh_out="$(git -C "$tap_repo" checkout --quiet --no-overwrite-ignore \
-      --detach FETCH_HEAD 2>&1)" || refresh_code=$?
+    refresh_out="$(git -C "$tap_repo" -c core.hooksPath=/dev/null checkout --quiet \
+      --no-overwrite-ignore --detach FETCH_HEAD 2>&1)" || refresh_code=$?
   fi
   if [ "$refresh_code" != "0" ]; then
     echo "error: refreshing the rvben/rumdl tap clone would destroy work in it" >&2
