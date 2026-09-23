@@ -384,9 +384,22 @@ setup_tap_clone() { # setup_tap_clone <casedir>
   # decide whether the fixture repository gets built.
   scratch_git -C "$d" add -f Formula scripts original.rb || return 1
   scratch_git -C "$d" commit -q -m "the tap at its first commit" || return 1
-  scratch_git clone -q "$d" "$d/tap-clone" || return 1
+
+  # The clone is a clone of `published`, not of the checkout, because that is the
+  # real topology: the tap clone under `brew --repository` came from GitHub, and
+  # the checkout is a separate clone of the same tap carrying the edit being
+  # validated. Cloning it straight from the checkout made the clone's `origin` and
+  # `$TAP_DIR` the same repository, so `fetch origin HEAD` and `fetch "$TAP_DIR"
+  # HEAD` fetched identical objects and the case could not tell them apart - a
+  # refresh from `origin` re-validates whatever is already published and never
+  # sees the contributor's commit at all.
+  scratch_git clone -q "$d" "$d/published" || return 1
+  scratch_git clone -q "$d/published" "$d/tap-clone" || return 1
+
   # The checkout moves on by one commit, so the refresh has something to do and
   # "the clone was left alone" and "the clone was refreshed" are different states.
+  # `published` stays behind at the first commit, which is what makes fetching
+  # from the wrong place observable.
   #
   # That commit changes the FORMULA, not merely some file. What the refresh exists
   # to achieve is that the brew checks below it read THIS Formula/rumdl.rb out of
@@ -397,6 +410,11 @@ setup_tap_clone() { # setup_tap_clone <casedir>
   printf 'a later change in the checkout\n' > "$d/later.txt" || return 1
   scratch_git -C "$d" add -f Formula/rumdl.rb later.txt || return 1
   scratch_git -C "$d" commit -q -m "the tap moved on by one commit" || return 1
+
+  # Every refusal promises to leave the clone alone, and "alone" includes its
+  # ref. Recorded here rather than per case so no refusal case can be written
+  # without the comparison being available to it.
+  scratch_git -C "$d/tap-clone" rev-parse HEAD > "$d/clone-head.txt" || return 1
 }
 
 setup_clone_clean() { setup_tap_clone "$1"; }
@@ -407,6 +425,19 @@ setup_clone_dirty() {
   # A copy of the edited file is kept, because the assertion has to require these
   # exact bytes back rather than "the clone is dirty". See assert_clone_still_dirty.
   cp "$1/tap-clone/Formula/rumdl.rb" "$1/clone-dirty-formula.rb" || return 1
+}
+
+# Dirt that is a file git is not tracking. `clean -fd` is the half of the refresh
+# that deletes these, and CONTRIBUTING.md promises they stop it, but every other
+# case's dirt is a modified tracked file - which `status --porcelain
+# --untracked-files=no` still reports. So a refresh that stopped looking at
+# untracked files, or that ran `clean -fd` before deciding whether to, destroyed
+# a contributor's unversioned work with every case still passing.
+setup_clone_untracked() {
+  setup_tap_clone "$1" || return 1
+  printf 'notes to myself, never committed\n' > "$1/tap-clone/experiment.md" || return 1
+  mkdir -p "$1/tap-clone/scratch" || return 1
+  printf 'and a whole untracked directory\n' > "$1/tap-clone/scratch/notes.md" || return 1
 }
 
 # One commit the checkout does not have, and nothing uncommitted. This is the shape
@@ -498,6 +529,19 @@ assert_clone_refreshed() { # <casedir>
     diff "$1/Formula/rumdl.rb" "$1/tap-clone/Formula/rumdl.rb" | sed 's/^/  /'
     return 1
   fi
+  # HEAD and one file are still two points, and a wrong refresh can hit both: a
+  # `reset --soft` that copies the formula across leaves the index and every other
+  # file at the previous commit while satisfying both checks above. What the
+  # refresh actually promises is that the clone IS the checkout's commit, which is
+  # a clean tree at that ref and nothing weaker.
+  local residue
+  residue="$(scratch_git -C "$1/tap-clone" status --porcelain)"
+  if [ -n "$residue" ]; then
+    echo "the tap clone is at the checkout's HEAD but is not clean at it, so part"
+    echo "of what brew reads is still from the previous commit:"
+    printf '%s\n' "$residue" | sed 's/^/  /'
+    return 1
+  fi
 }
 
 assert_clone_kept_its_commit() { # <casedir>
@@ -516,7 +560,43 @@ assert_clone_kept_its_commit() { # <casedir>
   fi
 }
 
+# Every refusal promises the clone was left as it was, so each refusal assertion
+# starts here: the ref itself must not have moved. A "refusal" that reset the
+# clone and then printed the error message satisfies a dirtiness check and an
+# exit code, and has already done the damage the message says it avoided.
+assert_clone_head_unmoved() { # <casedir>
+  local want got
+  want="$(cat "$1/clone-head.txt" 2>/dev/null)"
+  got="$(scratch_git -C "$1/tap-clone" rev-parse HEAD)"
+  if [ -z "$want" ]; then
+    echo "harness: no recorded clone HEAD to compare against"
+    return 1
+  fi
+  if [ "$want" != "$got" ]; then
+    echo "the refusal moved the clone's HEAD, which is the thing it said it would not do"
+    echo "  it was at: $want"
+    echo "  now at:    $got"
+    return 1
+  fi
+}
+
+# The untracked files must survive, and so must the untracked directory: `clean
+# -fd` removes directories too, and a check that only looked for the file would
+# pass on a clean that took the directory with it.
+assert_clone_untracked_kept() { # <casedir>
+  assert_clone_head_unmoved "$1" || return 1
+  local p
+  for p in experiment.md scratch/notes.md; do
+    if [ ! -f "$1/tap-clone/$p" ]; then
+      echo "the clone's untracked $p was deleted, which is work a contributor"
+      echo "cannot recover - it was never committed anywhere"
+      return 1
+    fi
+  done
+}
+
 assert_clone_still_dirty() { # <casedir>
+  assert_clone_head_unmoved "$1" || return 1
   if [ -z "$(scratch_git -C "$1/tap-clone" status --porcelain)" ]; then
     echo "the clone's uncommitted changes were discarded"
     return 1
@@ -803,7 +883,7 @@ case_run "a verification failure after the write restores the formula" 1 \
   "was restored to its previous contents" \
   update-formula.sh "$OTHER_VERSION" < "$FORMULA"
 
-# 18-21. validate-formula.sh's tap-clone refresh: the only data-destroying pair of
+# 18-22. validate-formula.sh's tap-clone refresh: the only data-destroying pair of
 #    commands in this repository, and the check that permits them. Each case gets a
 #    real checkout and a real clone of it, and each asserts what the clone still
 #    holds afterwards - the exit code says the guard fired, not that the work
@@ -826,7 +906,19 @@ CASE_ASSERT=assert_clone_still_dirty
 case_run "a tap clone with uncommitted changes is not discarded" 1 \
   "holds work this would destroy" validate-formula.sh < "$FORMULA"
 
-# 20. A commit the checkout does not have. Nothing shows as dirty, so only the
+# 20. Untracked files and an untracked directory in the clone. A separate case
+#     from 19 because the two are found by different things: a modified tracked
+#     file shows in `status` however it is invoked, while untracked files need
+#     `status` to be asked about them and are what `clean -fd` deletes. Dropping
+#     them from the check, or cleaning before deciding, left every other case
+#     passing while a contributor's unversioned notes were gone for good.
+CASE_SETUP=setup_clone_untracked
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_clone_untracked_kept
+case_run "a tap clone's untracked files are not cleaned away" 1 \
+  "holds work this would destroy" validate-formula.sh < "$FORMULA"
+
+# 21. A commit the checkout does not have. Nothing shows as dirty, so only the
 #     ahead-count sees it.
 CASE_SETUP=setup_clone_ahead
 CASE_STUBS=stubs_validator
@@ -834,7 +926,7 @@ CASE_ASSERT=assert_clone_kept_its_commit
 case_run "a tap clone holding its own commit is not reset" 1 \
   "commit(s) not in" validate-formula.sh < "$FORMULA"
 
-# 21. And the ahead-count failing to answer. This is the one that was wrong: a
+# 22. And the ahead-count failing to answer. This is the one that was wrong: a
 #     `rev-list` that could not run was coerced to 0, which with a clean worktree
 #     skipped both refusals and ran reset --hard on the very commits it could not
 #     count. The assertion is that the clone's own commit is still there, so this
