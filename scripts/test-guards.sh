@@ -49,7 +49,21 @@ if [ -z "${WORK:-}" ] || [ ! -d "$WORK" ]; then
   echo "       Every case needs one. Refusing to report guard failures for it." >&2
   exit 1
 fi
-trap 'rm -rf "$WORK"' EXIT
+# Kept when the run failed, deleted when it passed. Everything a real failure has
+# to be diagnosed from is in the case directories - the formula that went in, the
+# one that came out, the generated stubs, and the run's full output in out.txt -
+# and deleting them left only the excerpt printed above, so anything the excerpt
+# did not cover could only be recovered by editing this file and running it again.
+# The excerpt names the path, so the path has to still be there.
+cleanup() { # cleanup <exit code>
+  if [ "${1:-0}" != 0 ]; then
+    echo
+    echo "The cases' formulae, stubs and full output are kept in $WORK"
+    return
+  fi
+  rm -rf "$WORK"
+}
+trap 'cleanup $?' EXIT
 
 # Read from the formula rather than written in here. A mutation built from a
 # literal version or a literal hash stops matching the moment the tap moves to
@@ -66,29 +80,24 @@ fi
 # Any version that is not the current one, derived so it cannot collide with it.
 OTHER_VERSION="${CUR_VERSION%.*}.$((${CUR_VERSION##*.} + 1))"
 
-# An older version for the backwards-move case, and not just any older one. The
-# updater decides with `sort -V`, so the pair has to be one where plain `sort`
-# disagrees: with 0.1.0 against 0.2.77 both orderings give the same answer, and
-# dropping the -V left that case passing. Sorted lexicographically this version
-# must look NEWER than the current one while being genuinely older.
-OLDER_VERSION=""
-for cand in \
-  "${CUR_VERSION%.*}.$(printf '%s' "${CUR_VERSION##*.}" | cut -c1)" \
-  "${CUR_VERSION%.*}.$(( $(printf '%s' "${CUR_VERSION##*.}" | cut -c1) + 1 ))" \
-  "${CUR_VERSION%%.*}.$(printf '%s' "$CUR_VERSION" | cut -d. -f2 | cut -c1)".9
-do
-  lex="$(printf '%s\n%s\n' "$CUR_VERSION" "$cand" | sort | tail -1)"
-  ver="$(printf '%s\n%s\n' "$CUR_VERSION" "$cand" | sort -V | tail -1)"
-  if [ "$lex" = "$cand" ] && [ "$ver" = "$CUR_VERSION" ] && [ "$cand" != "$CUR_VERSION" ]; then
-    OLDER_VERSION="$cand"
-    break
-  fi
-done
-if [ -z "$OLDER_VERSION" ]; then
-  echo "HARNESS FAILURE: no older version was found that plain \`sort\` ranks above" >&2
-  echo "                 v$CUR_VERSION. The backwards-move case would then pass" >&2
+# The pair for the backwards-move case, and not just any older-newer pair. The
+# updater decides with `sort -V`, so plain `sort` has to disagree about these two
+# or the case passes with the -V dropped: 0.1.0 against 0.2.77 is ordered the same
+# way by both, and that left the case vacuous.
+#
+# The pair is synthesized, not derived from whatever version the tap is on. For a
+# current version like 0.2.9 NO older version exists that plain `sort` ranks above
+# it, so deriving the pair made the suite abort - turning CI red on a routine
+# version bump, which is the same defect this file warns about ten lines up. The
+# case gets its own formula claiming BACK_VERSION instead.
+BACK_VERSION=9.8.77
+OLDER_VERSION=9.8.8
+if [ "$(printf '%s\n%s\n' "$BACK_VERSION" "$OLDER_VERSION" | sort | tail -1)" != "$OLDER_VERSION" ] ||
+   [ "$(printf '%s\n%s\n' "$BACK_VERSION" "$OLDER_VERSION" | sort -V | tail -1)" != "$BACK_VERSION" ]; then
+  echo "HARNESS FAILURE: v$OLDER_VERSION must be older than v$BACK_VERSION by version" >&2
+  echo "                 and higher as text, or the backwards-move case passes" >&2
   echo "                 whether or not the updater sorts by version, which is the" >&2
-  echo "                 whole of what it tests. Add a candidate above." >&2
+  echo "                 whole of what it tests." >&2
   exit 1
 fi
 
@@ -242,6 +251,7 @@ unset ALLOW_UNATTESTED ALLOW_REPIN ALLOW_DOWNGRADE DISCARD_TAP_CLONE
 CASE_SETUP=""
 CASE_STUBS=""
 CASE_ASSERT=""
+CASE_ENV=""
 
 # ---------------------------------------------------------------------------
 # Fixture release assets, for the cases that run update-formula.sh to completion.
@@ -349,6 +359,12 @@ STUB
 }
 
 write_gh_stub() { # write_gh_stub <stubdir>
+  # The workflow the attestation must be signed by, written beside the stub rather
+  # than interpolated into it, for the reason write_curl_stub gives. This is the
+  # value the updater is supposed to ask for; a stub that accepted any value let
+  # the updater ask for a workflow nobody publishes, which refuses every real
+  # asset at release time while all 25 cases passed.
+  printf '%s\n' "rvben/rumdl/.github/workflows/release.yml" > "$1/gh.signer"
   cat > "$1/gh" <<'STUB'
 #!/bin/sh
 # `gh auth status` is checked once up front, and has to succeed here or the run
@@ -357,6 +373,18 @@ write_gh_stub() { # write_gh_stub <stubdir>
 case "$1 $2" in
   "auth status") exit 0 ;;
 esac
+want="$(cat "$(dirname "$0")/gh.signer")"
+got=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--signer-workflow" ] && got="$a"
+  prev="$a"
+done
+if [ "$got" != "$want" ]; then
+  echo "no attestation matching the signer workflow" >&2
+  echo "this stub attests $want; the run asked for '$got'" >&2
+  exit 1
+fi
 exit 0
 STUB
   chmod +x "$1/gh"
@@ -393,12 +421,27 @@ stubs_attested()   { write_curl_stub "$1" "$WORK/assets";   write_gh_stub "$1"; 
 # asset cannot separate: the loop stops on asset 1 either way. This one is refused
 # on asset 2, so an updater that checked only the first would sail past it.
 write_gh_stub_first_only() { # <stubdir>
+  printf '%s\n' "rvben/rumdl/.github/workflows/release.yml" > "$1/gh.signer"
   cat > "$1/gh" <<'STUB'
 #!/bin/sh
 case "$1 $2" in
   "auth status") exit 0 ;;
 esac
 here="$(dirname "$0")"
+# The same requirement as the plain stub: this one attests the first asset, and
+# only when asked for the workflow that actually signs rumdl's releases.
+want="$(cat "$here/gh.signer")"
+got=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--signer-workflow" ] && got="$a"
+  prev="$a"
+done
+if [ "$got" != "$want" ]; then
+  echo "no attestation matching the signer workflow" >&2
+  echo "this stub attests $want; the run asked for '$got'" >&2
+  exit 1
+fi
 n=$(( $(cat "$here/gh.attest.count" 2>/dev/null || echo 0) + 1 ))
 printf '%s' "$n" > "$here/gh.attest.count"
 [ "$n" = 1 ] && exit 0
@@ -664,6 +707,29 @@ setup_clone_uncommitted_formula() {
   printf '# an edit that was never committed\n' >> "$1/Formula/rumdl.rb" || return 1
 }
 
+# A second repository, for the case about GIT_DIR. `git -C <dir>` does not override
+# GIT_DIR, so with one exported - the ordinary state inside any git hook - every
+# git call in validate-formula.sh reads the repository GIT_DIR names rather than
+# the one -C points at, including the two that decide whether refreshing the tap
+# clone would destroy work, immediately above `reset --hard` and `clean -fd`.
+#
+# The decoy is a clean clone of the checkout at its own HEAD, chosen so that the
+# unprotected script produces a passing run rather than an error: nothing is
+# dirty, the ahead-count is 0, both refusal branches are skipped, and the refresh
+# lands on the decoy while the real tap clone stays at its old commit. The run
+# then prints "tap clone now at" and a sha that matches the checkout, and every
+# brew check below reads the formula nobody validated.
+setup_clone_decoy_repo() {
+  setup_tap_clone "$1" || return 1
+  scratch_git clone -q "$1" "$1/decoy" || return 1
+  scratch_git -C "$1/decoy" rev-parse HEAD > "$1/decoy-head.txt" || return 1
+}
+
+case_env_decoy_repo() { # <casedir>
+  printf 'GIT_DIR=%s\n' "$1/decoy/.git"
+  printf 'GIT_WORK_TREE=%s\n' "$1/decoy"
+}
+
 write_brew_stub() { # write_brew_stub <stubdir> <clonepath>
   # The clone's path is handed over in a file beside the stub, for the reason
   # write_curl_stub gives: interpolating it would break the stub on an apostrophe.
@@ -767,6 +833,27 @@ assert_clone_refreshed_and_quiet() { # <casedir>
     echo "exactly the formula the pin check read - but the run warned that it did"
     echo "not:"
     sed 's/^/  /' "$1/out.txt" | head -8
+    return 1
+  fi
+}
+
+# The refresh happened to the tap clone AND not to the repository GIT_DIR named.
+# Two bounds for the same reason as everywhere else here: clearing the overrides is
+# only correct if the work moved to the right repository, and a script that read
+# the decoy would satisfy a check that only asked whether the decoy was left alone.
+assert_clone_refreshed_and_decoy_untouched() { # <casedir>
+  assert_clone_refreshed_and_quiet "$1" || return 1
+  local want got
+  want="$(cat "$1/decoy-head.txt" 2>/dev/null)"
+  got="$(scratch_git -C "$1/decoy" rev-parse HEAD)"
+  if [ -z "$want" ]; then
+    echo "harness: no recorded decoy HEAD to compare against"
+    return 1
+  fi
+  if [ "$want" != "$got" ]; then
+    echo "the run moved the repository GIT_DIR named instead of the tap clone:"
+    echo "  decoy was at: $want"
+    echo "  now at:       $got"
     return 1
   fi
 }
@@ -891,8 +978,27 @@ case_run() {
     "$CASE_STUBS" "$dir/stub"
   fi
 
+  # The suite clears every git repository override for itself, which is right for
+  # the harness and means no case can ever exercise a script's own handling of one.
+  # A case that is about an inherited variable asks for it here, and gets it for
+  # that run only.
+  local -a case_env=()
+  if [ -n "${CASE_ENV:-}" ]; then
+    local line
+    while IFS= read -r line; do
+      [ -n "$line" ] && case_env+=("$line")
+    done < <("$CASE_ENV" "$dir")
+    if [ "${#case_env[@]}" -eq 0 ]; then
+      echo "HARNESS FAILURE: $CASE_ENV set no variables for '$name', so the case" >&2
+      echo "                 would run in the ordinary environment and pass for the" >&2
+      echo "                 wrong reason." >&2
+      exit 1
+    fi
+  fi
+
   local out code
-  out="$(cd "$dir" && PATH="$dir/stub:$PATH" "./scripts/$script" "$@" 2>&1)"
+  out="$(cd "$dir" && env PATH="$dir/stub:$PATH" "${case_env[@]+"${case_env[@]}"}" \
+    "./scripts/$script" "$@" 2>&1)"
   code=$?
   # Written out so an assertion can look at what the run printed, not only at what
   # it left on disk. What a refusal did NOT print is the evidence for several
@@ -920,6 +1026,7 @@ case_run() {
   CASE_STUBS=""
   CASE_ASSERT=""
   CASE_FORBID=""
+  CASE_ENV=""
 
   if [ -z "$why" ]; then
     pass=$((pass + 1))
@@ -928,7 +1035,19 @@ case_run() {
     fail=$((fail + 1))
     printf 'FAIL  %s\n' "$name"
     printf '      %s\n' "$why"
-    printf '%s\n' "$out" | sed 's/^/      | /' | head -12
+    # Both ends, not the head alone. The head says which check the run reached;
+    # the diagnosis is at the end, and a head-only excerpt cut it off exactly when
+    # it was needed: a validate-formula.sh case prints pages of brew progress
+    # before the line that explains the failure. The full text is in out.txt.
+    local lines
+    lines="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
+    if [ "$lines" -le 24 ]; then
+      printf '%s\n' "$out" | sed 's/^/      | /'
+    else
+      printf '%s\n' "$out" | head -12 | sed 's/^/      | /'
+      printf '      | ... %s more line(s), in full at %s ...\n' "$((lines - 24))" "$dir/out.txt"
+      printf '%s\n' "$out" | tail -12 | sed 's/^/      | /'
+    fi
   fi
 }
 
@@ -1054,6 +1173,13 @@ sys.stdout.write(t)
 PY
 assert_mutated "$WORK/unpaired.rb"
 CASE_ASSERT=assert_refused_before_download
+# Removing one url to balance the counts balances only the pair count: the
+# duplicated sha256 leaves 3 urls against 5 sha256 lines, so the count check
+# below refuses this formula too, and it also exits before the download. Deleting
+# the unpaired check's own `exit 1` therefore left this case passing on the count
+# check's refusal - measured, by making that exact edit and reading which message
+# came out.
+CASE_FORBID="they must agree"
 case_run "a sha256 with no url above it" 1 \
   "has no url above it" \
   verify-formula.sh < "$WORK/unpaired.rb"
@@ -1084,16 +1210,36 @@ case_run "a formula pinned to the bytes its urls fetch verifies clean" 0 \
 #     leaves behind. Three assets still verify, so the run is proved to have got
 #     through the loop: what fails it is the pin's format and nothing else.
 FIXTURE_FIRST_SHA="$(sed -n 's/^[[:space:]]*sha256 "\([^"]*\)".*/\1/p' "$WORK/fixture-pinned.rb" | head -1)"
-sed "s|sha256 \"$FIXTURE_FIRST_SHA\"|sha256 \"PLACEHOLDER\"|" "$WORK/fixture-pinned.rb" > "$WORK/placeholder.rb"
-if cmp -s "$WORK/placeholder.rb" "$WORK/fixture-pinned.rb"; then
-  echo "HARNESS FAILURE: the placeholder mutation changed nothing." >&2
-  exit 1
-fi
+
+# "64 hex characters" is two requirements, and one bad pin can only test one of
+# them. A `PLACEHOLDER` violates both at once, so widening the character class to
+# [0-9a-z] left the case passing - and a 64-character pin containing a z is then
+# sent to `sha256`-comparison as a valid pin, where it simply never matches and
+# the asset reports as changed bytes rather than as a malformed formula.
+#
+# So one pin per requirement: 64 characters that are not all hex, and hex that is
+# not 64 characters long.
+bad_pin() { # bad_pin <pin> <outfile>
+  sed "s|sha256 \"$FIXTURE_FIRST_SHA\"|sha256 \"$1\"|" "$WORK/fixture-pinned.rb" > "$2"
+  if cmp -s "$2" "$WORK/fixture-pinned.rb"; then
+    echo "HARNESS FAILURE: substituting the pin '$1' changed nothing." >&2
+    exit 1
+  fi
+}
+bad_pin "$(printf 'z%.0s' $(seq 64))" "$WORK/pin-nonhex.rb"
+bad_pin "0123abcd" "$WORK/pin-short.rb"
+
 CASE_STUBS=stubs_verifier
 CASE_ASSERT=assert_only_the_pin_format_failed
-case_run "a pin that is not 64 hex characters" 1 \
+case_run "a 64-character pin that is not hexadecimal" 1 \
   "pinned sha256 is not 64 hex characters" \
-  verify-formula.sh < "$WORK/placeholder.rb"
+  verify-formula.sh < "$WORK/pin-nonhex.rb"
+
+CASE_STUBS=stubs_verifier
+CASE_ASSERT=assert_only_the_pin_format_failed
+case_run "a hexadecimal pin that is not 64 characters" 1 \
+  "pinned sha256 is not 64 hex characters" \
+  verify-formula.sh < "$WORK/pin-short.rb"
 
 # 10-12. The updater's version guard. It reaches curl, a url and the formula
 #    text, and the value arrives from a repository_dispatch payload. Run with
@@ -1111,8 +1257,17 @@ case_run "a version whose first line only looks valid" 2 \
 # than the version the formula names, so this fails if the updater compares
 # versions as strings. Which candidate is used is chosen at startup and checked
 # there for actually discriminating.
+# The formula rewritten to claim BACK_VERSION, so what this case compares is the
+# synthesized pair and not the version the tap happens to be on. Every url carries
+# the version, so one substitution keeps them consistent with each other.
+sed "s|v$CUR_VERSION|v$BACK_VERSION|g" "$FORMULA" > "$WORK/back-version.rb"
+if grep -qF "v$CUR_VERSION" "$WORK/back-version.rb" || ! grep -qF "v$BACK_VERSION" "$WORK/back-version.rb"; then
+  echo "HARNESS FAILURE: rewriting the formula to v$BACK_VERSION did not take, so the" >&2
+  echo "                 case would compare v$OLDER_VERSION against v$CUR_VERSION instead." >&2
+  exit 1
+fi
 case_run "moving the tap to an older version" 1 \
-  "Refusing to move the tap backwards" update-formula.sh "$OLDER_VERSION" < "$FORMULA"
+  "Refusing to move the tap backwards" update-formula.sh "$OLDER_VERSION" < "$WORK/back-version.rb"
 
 # 13-17. The updater past its structural checks, where what gets pinned is
 #    actually decided. Downloads succeed from here on, so ALLOW_UNATTESTED must go:
@@ -1260,6 +1415,22 @@ CASE_STUBS=stubs_validator
 CASE_ASSERT=assert_said_the_edit_was_not_audited
 case_run "an uncommitted formula edit is reported as unaudited" 0 \
   "tap clone now at" validate-formula.sh < "$FORMULA"
+
+# 26. A git repository override inherited from the environment. git exports GIT_DIR
+#     to every hook it runs, and this script is the repository's one-command local
+#     gate, so a pre-push hook that calls it is the obvious way to make it
+#     automatic. `git -C <dir>` does not override GIT_DIR, so without the script
+#     clearing it, the check that decides whether refreshing the tap clone would
+#     destroy work inspects a different repository entirely - and answers "nothing
+#     to lose" about a clone it never looked at. The clone here is clean, so the
+#     evidence is the refresh landing on the right repository rather than a
+#     refusal, which any mistake would also produce.
+CASE_SETUP=setup_clone_decoy_repo
+CASE_ENV=case_env_decoy_repo
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_clone_refreshed_and_decoy_untouched
+case_run "an inherited GIT_DIR does not redirect the tap-clone checks" 0 \
+  "Clearing inherited git repository overrides" validate-formula.sh < "$FORMULA"
 
 echo
 if [ "$fail" -ne 0 ]; then
