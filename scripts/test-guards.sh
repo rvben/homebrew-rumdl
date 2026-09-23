@@ -34,6 +34,33 @@ FORMULA="Formula/rumdl.rb"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# Read from the formula rather than written in here. A mutation built from a
+# literal version or a literal hash stops matching the moment the tap moves to
+# the next release: the case then receives an unmodified formula, the guard
+# correctly accepts it, and the case fails - turning CI red on a routine version
+# bump, in the job that runs before pin verification. Verified by bumping a
+# scratch copy of the formula and re-running this suite.
+CUR_VERSION="$(sed -n 's|.*/releases/download/v\([0-9][0-9.]*\)/.*|\1|p' "$FORMULA" | sort -u | head -1)"
+FIRST_SHA="$(sed -n 's/^[[:space:]]*sha256 "\([^"]*\)".*/\1/p' "$FORMULA" | head -1)"
+if [ -z "$CUR_VERSION" ] || [ -z "$FIRST_SHA" ]; then
+  echo "error: could not read the current version and first pin from $FORMULA" >&2
+  exit 1
+fi
+# Any version that is not the current one, derived so it cannot collide with it.
+OTHER_VERSION="${CUR_VERSION%.*}.$((${CUR_VERSION##*.} + 1))"
+
+# The guard against the failure above, applied to every mutation: a sed or python
+# program that matches nothing produces the formula unchanged, and a case fed an
+# unchanged formula is testing nothing while blaming the guard for it.
+assert_mutated() { # assert_mutated <file>
+  if cmp -s "$1" "$FORMULA"; then
+    echo "HARNESS FAILURE: the mutation for the next case changed nothing." >&2
+    echo "                 It would test an unmodified formula and report the" >&2
+    echo "                 guard as broken. Fix the mutation, not the guard." >&2
+    exit 1
+  fi
+}
+
 # A curl that cannot succeed, so the structural checks are all that runs. Exit 6
 # is curl's own "could not resolve host", which is what an offline run would give
 # anyway.
@@ -104,6 +131,7 @@ out = t.replace(a, "@@A@@").replace(b, "@@B@@").replace("@@A@@", b).replace("@@B
 assert out != t and out.count("apple-darwin") == t.count("apple-darwin")
 sys.stdout.write(out)
 PY
+assert_mutated "$WORK/macswap.rb"
 case_run "macOS pairs swapped between the intel and arm branches" 1 \
   "the macos:intel branch must carry x86_64-apple-darwin" \
   verify-formula.sh < "$WORK/macswap.rb"
@@ -111,6 +139,7 @@ case_run "macOS pairs swapped between the intel and arm branches" 1 \
 # 4. A platform dropped entirely. The url, sha256 and pair counts all stay in
 #    agreement, so only the expected-platform list catches it.
 sed '/x86_64-apple-darwin/,+1d' "$FORMULA" > "$WORK/dropped.rb"
+assert_mutated "$WORK/dropped.rb"
 case_run "a platform removed with its pin" 1 \
   "does not ship the expected set of platforms" \
   verify-formula.sh < "$WORK/dropped.rb"
@@ -118,14 +147,24 @@ case_run "a platform removed with its pin" 1 \
 # 5. A url pointing somewhere other than rumdl's releases. A host serving bytes
 #    that match the pin satisfies every hash check there is.
 sed 's|github.com/rvben/rumdl/releases|github.com/someone/else/releases|' "$FORMULA" > "$WORK/origin.rb"
+assert_mutated "$WORK/origin.rb"
 case_run "a url that does not fetch from rumdl's releases" 1 \
   "does not fetch from rumdl's own releases" \
   verify-formula.sh < "$WORK/origin.rb"
 
 # 6. A half-rewritten formula: one platform moved to a new release, the rest left
 #    behind. The version is scanned from the urls, so they have to agree.
-sed 's|v0\.2\.76/rumdl-v0\.2\.76-aarch64-unknown-linux-musl|v0.2.77/rumdl-v0.2.77-aarch64-unknown-linux-musl|' \
-  "$FORMULA" > "$WORK/mixed.rb"
+awk -v cur="v$CUR_VERSION" -v other="v$OTHER_VERSION" '
+  /^[[:space:]]*url "/ && /aarch64-unknown-linux-musl\.tar\.gz/ {
+    n = gsub(cur, other)
+    if (n != 2) {
+      print "mutation: expected 2 version mentions in the url, changed " n > "/dev/stderr"
+      exit 1
+    }
+  }
+  { print }
+' "$FORMULA" > "$WORK/mixed.rb"
+assert_mutated "$WORK/mixed.rb"
 case_run "urls naming two different versions" 1 \
   "name more than one version" \
   verify-formula.sh < "$WORK/mixed.rb"
@@ -133,6 +172,7 @@ case_run "urls naming two different versions" 1 \
 # 7. A url that sits in no CPU branch at all, so nothing decides which machine
 #    gets it.
 sed '/Hardware::CPU.intel?/d' "$FORMULA" > "$WORK/unbound.rb"
+assert_mutated "$WORK/unbound.rb"
 case_run "a url outside any Hardware::CPU branch" 1 \
   "sits in no recognised platform branch" \
   verify-formula.sh < "$WORK/unbound.rb"
@@ -151,6 +191,7 @@ t = t[:m.end()] + f'{m.group(1)}sha256 "{m.group(2)}"\n' + t[m.end():]
 t = re.sub(r' *url "[^"]*aarch64-unknown-linux-musl\.tar\.gz"\n', '', t, count=1)
 sys.stdout.write(t)
 PY
+assert_mutated "$WORK/unpaired.rb"
 case_run "a sha256 with no url above it" 1 \
   "has no url above it" \
   verify-formula.sh < "$WORK/unpaired.rb"
@@ -158,8 +199,8 @@ case_run "a sha256 with no url above it" 1 \
 # 9. A pin that is not a sha256 at all. Checked before the download, so a
 #    placeholder left in the formula fails by name rather than as a hash
 #    mismatch.
-sed 's|sha256 "415df77d4c5d11f336733c9570a72cd0a188d8e6a7460a76134c4c033ec5ece7"|sha256 "PLACEHOLDER"|' \
-  "$FORMULA" > "$WORK/placeholder.rb"
+sed "s|sha256 \"$FIRST_SHA\"|sha256 \"PLACEHOLDER\"|" "$FORMULA" > "$WORK/placeholder.rb"
+assert_mutated "$WORK/placeholder.rb"
 case_run "a pin that is not 64 hex characters" 1 \
   "pinned sha256 is not 64 hex characters" \
   verify-formula.sh < "$WORK/placeholder.rb"
