@@ -2329,6 +2329,23 @@ case_run "urls naming two different versions" 1 \
   "name more than one version" \
   verify-formula.sh < "$WORK/mixed.rb"
 
+# A version whose dots are mangled in the RELEASE PATH, with the asset filename left
+# correct: the url 404s at install time. The filename is what the platform set is read
+# from, so mangling it instead is refused earlier, by the platform check - measured, and
+# the reason this case mutates the path.
+#
+# The dots rather than the digits, because that is the shape the count used to miss:
+# unanchored and unescaped, `grep -o "v0.2.77"` matches `v0X2X77` too, so the formula
+# reached the expected number of mentions and the run went on to discover the 404 over the
+# network instead of refusing offline on the bytes in front of it.
+sed 's|download/v'"$CUR_VERSION"'/rumdl-v'"$CUR_VERSION"'-aarch64|download/v'"$(printf '%s' "$CUR_VERSION" | tr '.' 'X')"'/rumdl-v'"$CUR_VERSION"'-aarch64|' \
+  "$FORMULA" > "$WORK/dots.rb"
+assert_mutated "$WORK/dots.rb"
+CASE_ASSERT=assert_refused_before_download
+case_run "a version whose dots are mangled in the release path" 1 \
+  "times across" \
+  verify-formula.sh < "$WORK/dots.rb"
+
 # A url that sits in no CPU branch at all, so nothing decides which machine
 # gets it. Removing the branch also leaves the branch counts wrong, so the
 # backstop further down refuses this formula too - its message must stay absent

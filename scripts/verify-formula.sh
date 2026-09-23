@@ -289,8 +289,14 @@ VERSION="$versions"
 # Each url should name its version twice: once in the release path, once in the
 # asset filename. Catching a mismatch here matters because the second one is
 # part of the filename and a wrong one is a 404 at install time.
+#
+# -F, because the version's dots are regex metacharacters otherwise and this is
+# an exact-count comparison: measured, `grep -o "v0.2.77"` counts `v0X2X77` as a
+# mention, so a filename with the version mangled that way reaches the expected
+# count and the check passes on a url that 404s. Over-counting is the only
+# direction this can err in, and it is the direction that hides a defect.
 expected_mentions=$((url_count * 2))
-actual_mentions="$(grep -o "v${VERSION}" "$FORMULA" | wc -l | tr -d ' ')"
+actual_mentions="$(grep -oF "v${VERSION}" "$FORMULA" | wc -l | tr -d ' ')"
 if [ "$actual_mentions" != "$expected_mentions" ]; then
   echo "error: expected v$VERSION to appear $expected_mentions times across $url_count urls, found $actual_mentions" >&2
   exit 1
