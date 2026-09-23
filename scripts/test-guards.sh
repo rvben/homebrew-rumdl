@@ -43,7 +43,12 @@ cd "$(dirname "$0")/.." || exit 1
 FORMULA="Formula/rumdl.rb"
 [ -f "$FORMULA" ] || { echo "error: $FORMULA not found" >&2; exit 1; }
 
-WORK="$(mktemp -d)"
+# An explicit template, because BSD `mktemp -d` with no template ignores TMPDIR
+# entirely and answers under /var/folders - measured on macOS 25. That makes the
+# filesystem the cases run on unchoosable, and one case below turns on whether that
+# filesystem folds case, so the branch a Linux runner takes could not be exercised
+# here at all.
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/rumdl-guards.XXXXXXXX")"
 # There is no `set -e` here, so a failed mktemp is not fatal by itself: $WORK ends
 # up empty, every case builds its scratch tree at /case-N, mkdir is denied, and
 # twelve guard failures get reported for a scratch directory that was never
@@ -55,6 +60,22 @@ if [ -z "${WORK:-}" ] || [ ! -d "$WORK" ]; then
   echo "       Every case needs one. Refusing to report guard failures for it." >&2
   exit 1
 fi
+
+# One case turns on whether this filesystem folds case: an ignored `Notes.md` and a
+# tracked `notes.md` are one file on macOS and two on the Linux runner, so the
+# collision it tests exists on one and not the other. Hardcoding either answer makes
+# the case wrong on the other platform, and skipping it there would leave the suite
+# silently thinner where it runs most often. So the filesystem is asked, here, once,
+# and the case takes its expectation from the answer - which gives the case-folding
+# platform a refusal to assert and the case-sensitive one the useful opposite: that
+# two files differing only in case are NOT mistaken for a collision.
+: > "$WORK/CaseProbe"
+if [ -e "$WORK/caseprobe" ]; then
+  FS_FOLDS_CASE=1
+else
+  FS_FOLDS_CASE=0
+fi
+rm -f "$WORK/CaseProbe"
 # Kept when the run failed, deleted when it passed. Everything a real failure has
 # to be diagnosed from is in the case directories - the formula that went in, the
 # one that came out, the generated stubs, and the run's full output in out.txt -
@@ -760,21 +781,21 @@ case_env_suppress_untracked() { # <casedir>
   printf 'GIT_CONFIG_VALUE_0=no\n'
 }
 
-# The next three fixtures all hide a local edit from every list the inventory reads,
-# and each records the path and the bytes it hid, for assert_clone_hidden_edit_kept.
+# The fixtures below all hide a local edit from every list the inventory reads, and
+# each records the path and the bytes it hid, for assert_clone_hidden_bytes_kept.
 #
 # An edit to a tracked file that git has been told not to stat. Neither `status` nor
 # `diff --quiet HEAD` reports it, so only the index-flag check sees it.
 #
 # The marked path is scripts/verify-formula.sh rather than the formula, and that
-# choice is the whole case. Measured, on the two shapes assume-unchanged produces:
-# when the fetched tree CHANGES the marked path, `reset --hard` refuses outright with
-# "Entry '...' not uptodate. Cannot merge." and the bytes survive - a bad run, but not
-# a lost edit. When the fetched tree leaves the marked path alone, `reset --hard`
-# exits 0 and rewrites the file from the index, and the edit is gone. The checkout's
-# later commit changes Formula/rumdl.rb and leaves scripts/ alone, so marking a script
-# is what puts real bytes at risk here; marking the formula would have this case
-# passing on git's refusal instead of on the guard.
+# choice is the whole case. Measured, on both flags: when the fetched tree CHANGES the
+# marked path the refresh aborts on its own, exit 1 with HEAD unmoved - so a case
+# built that way passes on git's refusal and says nothing about the guard. When the
+# fetched tree leaves the marked path alone the refresh exits 0 and moves HEAD, and
+# only the guard stands between the contributor's hidden edit and a run that carries
+# it into every brew check below. The checkout's later commit changes
+# Formula/rumdl.rb and leaves scripts/ alone, so marking a script is what makes the
+# guard the thing under test.
 setup_clone_assume_unchanged_edit() {
   setup_tap_clone "$1" || return 1
   scratch_git -C "$1/tap-clone" update-index \
@@ -786,7 +807,7 @@ setup_clone_assume_unchanged_edit() {
 }
 
 # skip-worktree on the formula, which loses no bytes at all and is worth refusing for
-# the other reason. Measured: `reset --hard` honours the flag, so the clone keeps the
+# the other reason. Measured: the refresh honours the flag, so the clone keeps the
 # contributor's formula - and every brew check below then audits, installs and tests
 # that file while the run reports on the formula under validation. Same hidden state,
 # same refusal, opposite consequence: not destroyed work, but a validated formula
@@ -794,12 +815,12 @@ setup_clone_assume_unchanged_edit() {
 #
 # The clone is brought level with the checkout first, and that is what makes the case
 # the one it claims to be. Measured, on both flags: when the fetched tree CHANGES the
-# marked path, `reset --hard` refuses outright with "Entry '...' not uptodate. Cannot
-# merge." and exits 128 - a run that dies confusingly, not a wrong one. The base
-# fixture's later commit changes the formula, so written against it this case caught
-# git's refusal rather than the guard, and the first version of it did exactly that.
-# Level, the reset has nothing to change for that path, the flag is honoured, and the
-# brew checks read the contributor's formula while the run reports on ours.
+# marked path the refresh aborts on its own with exit 1 - a run that dies confusingly,
+# not a wrong one. The base fixture's later commit changes the formula, so written
+# against it this case caught git's refusal rather than the guard, and the first
+# version of it did exactly that. Level, the refresh has nothing to change for that
+# path, the flag is honoured, and the brew checks read the contributor's formula while
+# the run reports on ours.
 setup_clone_skip_worktree_formula() {
   setup_tap_clone "$1" || return 1
   scratch_git -C "$1/tap-clone" fetch -q "$1" HEAD || return 1
@@ -815,27 +836,78 @@ setup_clone_skip_worktree_formula() {
   cp "$1/tap-clone/Formula/rumdl.rb" "$1/hidden-bytes" || return 1
 }
 
-# A path the FETCHED commit tracks, held here as a locally created ignored file.
-# Ignored files are absent from `status` and from `ls-files -v`, and `clean -fd`
-# without -x leaves them alone, so for every other case they are correctly none of
-# this script's business. This one shape is different: `reset --hard` writes the
-# fetched tree over the file without the collision check `git checkout` makes, so the
-# bytes are replaced while every list the inventory reads stays empty.
+# The next three fixtures are one shape in three forms: a path the FETCHED commit
+# tracks, held in the clone as a locally created ignored file. Ignored files are
+# absent from `status` and from `ls-files -v`, and `clean -fd` without -x leaves them
+# alone, so for every other case they are correctly none of this script's business.
+# This shape is different, and none of the inventory's lists can see it.
+#
+# Three forms rather than one because an exact-path comparison catches only the first,
+# and each of the other two was measured to destroy the local bytes while every list
+# read clean: a name that differs only in case, which is one file wherever the
+# filesystem folds case, and a name that collides with an ancestor rather than with a
+# name. Together they are the reason the refresh asks git about collisions instead of
+# comparing path lists here.
 #
 # The ignore rule goes in the clone's own .git/info/exclude, which is where a
-# personal, uncommitted ignore belongs and which --exclude-standard reads.
+# personal, uncommitted ignore belongs and which --exclude-standard reads. A fresh
+# clone has no .git/info at all, so the directory comes first.
+clone_ignores() { # clone_ignores <casedir> <pattern>
+  mkdir -p "$1/tap-clone/.git/info" || return 1
+  printf '%s\n' "$2" >> "$1/tap-clone/.git/info/exclude" || return 1
+}
+
+# The exact form: ignored notes.md, fetched commit tracks notes.md.
 setup_clone_ignored_tracked_upstream() {
   setup_tap_clone "$1" || return 1
   printf 'the fetched bytes, which this clone never asked for\n' > "$1/notes.md" ||
     return 1
   scratch_git -C "$1" add -f notes.md || return 1
   scratch_git -C "$1" commit -q -m "the tap starts tracking notes.md" || return 1
-  # A fresh clone has no .git/info at all, so the directory comes first.
-  mkdir -p "$1/tap-clone/.git/info" || return 1
-  printf 'notes.md\n' >> "$1/tap-clone/.git/info/exclude" || return 1
+  clone_ignores "$1" notes.md || return 1
   printf 'MY PRIVATE NOTES\n' > "$1/tap-clone/notes.md" || return 1
   printf '%s\n' notes.md > "$1/hidden-path" || return 1
   cp "$1/tap-clone/notes.md" "$1/hidden-bytes" || return 1
+}
+
+# The case-folding form: ignored Notes.md, fetched commit tracks notes.md. Two
+# different strings, and on macOS one file. The fixture is identical on both kinds of
+# filesystem and only the expectation differs, so the case-sensitive platform runs it
+# as the control it is: two files, no collision, refresh proceeds, bytes untouched.
+setup_clone_ignored_case_collision() {
+  setup_tap_clone "$1" || return 1
+  printf 'the fetched bytes, which this clone never asked for\n' > "$1/notes.md" ||
+    return 1
+  scratch_git -C "$1" add -f notes.md || return 1
+  scratch_git -C "$1" commit -q -m "the tap starts tracking notes.md" || return 1
+  clone_ignores "$1" Notes.md || return 1
+  printf 'MY PRIVATE NOTES\n' > "$1/tap-clone/Notes.md" || return 1
+  # Recorded under the name the clone actually holds, which on a folding filesystem
+  # is the one that already existed: git created notes.md, the open() found Notes.md.
+  if [ -f "$1/tap-clone/Notes.md" ]; then
+    printf '%s\n' Notes.md > "$1/hidden-path" || return 1
+  else
+    printf '%s\n' notes.md > "$1/hidden-path" || return 1
+  fi
+  cp "$1/tap-clone/$(cat "$1/hidden-path")" "$1/hidden-bytes" || return 1
+}
+
+# The ancestor form: ignored notes/private, fetched commit tracks a FILE named notes.
+# Writing that file means removing the directory, and the directory holds work. No
+# comparison of path strings matches here - `notes` and `notes/private` are different
+# names - which is why this form escaped the intersection that caught the first.
+setup_clone_ignored_dir_collision() {
+  setup_tap_clone "$1" || return 1
+  printf 'the fetched bytes, and it is a file, not a directory\n' > "$1/notes" ||
+    return 1
+  scratch_git -C "$1" add -f notes || return 1
+  scratch_git -C "$1" commit -q -m "the tap starts tracking a file named notes" ||
+    return 1
+  clone_ignores "$1" 'notes/' || return 1
+  mkdir -p "$1/tap-clone/notes" || return 1
+  printf 'MY PRIVATE NOTES\n' > "$1/tap-clone/notes/private" || return 1
+  printf '%s\n' notes/private > "$1/hidden-path" || return 1
+  cp "$1/tap-clone/notes/private" "$1/hidden-bytes" || return 1
 }
 
 write_brew_stub() { # write_brew_stub <stubdir> <clonepath> [livecheck-json-file]
@@ -1083,26 +1155,36 @@ assert_clone_untracked_kept() { # <casedir>
 # the same answer before and after the loss. Comparing against the recorded copy is
 # the only way to see it, which is also why the script has to refuse rather than ask
 # git for a verdict it cannot give.
-assert_clone_hidden_edit_kept() { # <casedir>
+assert_clone_hidden_bytes_only() { # <casedir>
   if [ ! -f "$1/hidden-bytes" ] || [ ! -f "$1/hidden-path" ]; then
     echo "harness: the fixture recorded no hidden edit to compare against"
     return 1
   fi
-  local rel bad=0
+  local rel
   rel="$(cat "$1/hidden-path")"
-  # The bytes are checked before the ref, and neither check returns early, so a
-  # failure names every consequence rather than the first one. An early return on the
-  # ref answered "did HEAD move?" and left "did the work survive?" unasked - and that
-  # second question is the only reason these three cases exist.
   if [ ! -f "$1/tap-clone/$rel" ]; then
     echo "the clone's $rel is gone - the run deleted a file git was not reporting"
-    bad=1
-  elif ! cmp -s "$1/hidden-bytes" "$1/tap-clone/$rel"; then
+    return 1
+  fi
+  if ! cmp -s "$1/hidden-bytes" "$1/tap-clone/$rel"; then
     echo "the clone's hidden edit to $rel was overwritten - git reports no change for"
     echo "that path, so nothing else in this suite would notice:"
     diff "$1/hidden-bytes" "$1/tap-clone/$rel" | sed 's/^/  /'
-    bad=1
+    return 1
   fi
+}
+
+# Bytes and ref together, for the cases that expect a refusal. Split from the
+# bytes-only half because one case expects the refresh to SUCCEED - an ignored path
+# that collides only on a case-folding filesystem, run on one that does not fold -
+# and there the ref is supposed to move while the bytes are supposed to survive.
+#
+# Both checks run; neither returns early, so a failure names every consequence rather
+# than the first one. An early return on the ref answered "did HEAD move?" and left
+# "did the work survive?" unasked, which is the only question these cases exist for.
+assert_clone_hidden_bytes_kept() { # <casedir>
+  local bad=0
+  assert_clone_hidden_bytes_only "$1" || bad=1
   assert_clone_head_unmoved "$1" || bad=1
   return "$bad"
 }
@@ -1679,7 +1761,7 @@ case_run "an inherited GIT_CONFIG_COUNT cannot hide the clone's untracked files"
 # before a destructive command has to stop the run.
 CASE_SETUP=setup_clone_assume_unchanged_edit
 CASE_STUBS=stubs_validator
-CASE_ASSERT=assert_clone_hidden_edit_kept
+CASE_ASSERT=assert_clone_hidden_bytes_kept
 case_run "a tracked edit git was told not to stat is not overwritten" 1 \
   "assume-unchanged or skip-worktree" validate-formula.sh < "$FORMULA"
 
@@ -1690,20 +1772,51 @@ case_run "a tracked edit git was told not to stat is not overwritten" 1 \
 # prevents here is a passing run about the wrong bytes.
 CASE_SETUP=setup_clone_skip_worktree_formula
 CASE_STUBS=stubs_validator
-CASE_ASSERT=assert_clone_hidden_edit_kept
+CASE_ASSERT=assert_clone_hidden_bytes_kept
 case_run "a formula the clone was told to keep is not validated as ours" 1 \
   "assume-unchanged or skip-worktree" validate-formula.sh < "$FORMULA"
 
-# An ignored file in the clone that the fetched commit tracks. Nothing the inventory
-# reads mentions it - status omits ignored paths, `ls-files -v` lists only tracked
-# ones - and `reset --hard` writes the fetched bytes over it without the collision
-# check `git checkout` would make. The message is asserted rather than the generic
-# refusal, because this path is reachable by exactly one of the inventory's checks.
+# An ignored file in the clone that the fetched commit tracks, in its three forms.
+# Nothing the inventory reads mentions any of them - status omits ignored paths,
+# `ls-files -v` lists only tracked ones - so the refusal can only come from the
+# refresh itself, and the asserted message is the refresh's rather than the
+# inventory's. That distinction is the point: "holds work this would destroy" is the
+# inventory speaking, "would destroy work in it" is git refusing the checkout, and a
+# case that accepted either would not say which half answered.
 CASE_SETUP=setup_clone_ignored_tracked_upstream
 CASE_STUBS=stubs_validator
-CASE_ASSERT=assert_clone_hidden_edit_kept
+CASE_ASSERT=assert_clone_hidden_bytes_kept
 case_run "an ignored file the fetched commit tracks is not overwritten" 1 \
-  "ignored here, tracked by the fetched commit" validate-formula.sh < "$FORMULA"
+  "would destroy work in it" validate-formula.sh < "$FORMULA"
+
+# The same collision reached through an ancestor: the fetched commit tracks a file
+# where this clone keeps a directory of ignored work. Writing the file means removing
+# the directory, and no comparison of path names matches `notes` against
+# `notes/private`.
+CASE_SETUP=setup_clone_ignored_dir_collision
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_clone_hidden_bytes_kept
+case_run "an ignored directory the fetched commit tracks as a file is not removed" 1 \
+  "would destroy work in it" validate-formula.sh < "$FORMULA"
+
+# And the same collision reached through case folding, where the expectation is the
+# filesystem's to decide. On a folding filesystem an ignored Notes.md and a tracked
+# notes.md are one file and the refresh must refuse; on a case-sensitive one they are
+# two files, nothing collides, and the run must complete - which is the control that
+# keeps the refusal from being satisfied by a refresh that refuses everything.
+CASE_SETUP=setup_clone_ignored_case_collision
+CASE_STUBS=stubs_validator
+if [ "$FS_FOLDS_CASE" = 1 ]; then
+  CASE_ASSERT=assert_clone_hidden_bytes_kept
+  case_run "an ignored file differing only in case is one file, and is not overwritten" \
+    1 "would destroy work in it" validate-formula.sh < "$FORMULA"
+else
+  # The bytes only: here the refresh is supposed to succeed, so HEAD is supposed to
+  # move, and asserting it unmoved would fail on correct behaviour.
+  CASE_ASSERT=assert_clone_hidden_bytes_only
+  case_run "an ignored file differing only in case is a different file, and survives" \
+    0 "tap clone now at" validate-formula.sh < "$FORMULA"
+fi
 
 # The formula's livecheck block resolving nothing. This is the block that tells a
 # maintainer a new rumdl release exists, and a broken one is invisible: `brew audit`
