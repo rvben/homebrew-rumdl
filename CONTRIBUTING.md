@@ -33,7 +33,7 @@ reports every platform rather than stopping at the first failure.
 Do not edit the version or the hashes by hand. Run:
 
 ```bash
-./scripts/update-formula.sh 0.2.76
+./scripts/update-formula.sh 0.2.78   # the rumdl release you are moving to
 ```
 
 It rewrites the version inside each `url`, downloads exactly those urls, pins
@@ -43,10 +43,21 @@ belonging to a different artifact than the url beside it. If any asset cannot be
 downloaded it aborts and leaves the formula untouched, rather than bumping the
 version while one platform keeps the previous release's hash.
 
-It needs the GitHub CLI, because it checks each asset's Sigstore build provenance
-(`gh attestation verify --repo rvben/rumdl --signer-workflow ...`) before pinning
-it. A hash proves the bytes have not changed since they were hashed; the
-attestation is what ties them to a rumdl release build.
+It needs the GitHub CLI (2.68.0 or newer), because it checks each asset's Sigstore
+build provenance before pinning it:
+
+```bash
+gh attestation verify <asset> --repo rvben/rumdl \
+  --signer-workflow rvben/rumdl/.github/workflows/release.yml \
+  --source-ref refs/tags/v<version>
+```
+
+A hash proves the bytes have not changed since they were hashed; the attestation
+is what ties them to a rumdl release build, and `--source-ref` is what ties them
+to the release being pinned rather than to any rumdl release. Without that last
+flag, another version's binary served under this version's url passes every check
+in this repository, and the first thing to notice is `test do`'s `assert_match
+"rumdl #{version}"` in CI, after the bot has pushed.
 
 Three things it refuses to do quietly, each with an escape hatch for when you
 mean it:
@@ -62,6 +73,27 @@ mean it:
 Normally you do not run it at all: rumdl's release workflow sends a
 `repository_dispatch` and `.github/workflows/update-formula.yml` does the above,
 commits, pushes, and then asks Validate Formula to run.
+
+## Withdrawing a version
+
+Everything above moves the tap forward. When a version the tap already pins has
+to be taken back, because the build turned out to be bad or the release was
+deleted or re-tagged, revert the commit that pinned it:
+
+```bash
+git revert <the commit that pinned it>
+```
+
+That restores urls and pins that verified together when they were current, which
+is why it beats the alternatives. Re-running the updater at the older version
+needs `ALLOW_DOWNGRADE=1` and re-downloads live assets, so it only works while
+that older release is still published. Editing the formula by hand is what
+`verify-formula.sh` exists to catch.
+
+Then expect the daily `freshness` job to fail every day until rumdl publishes a
+release the tap can move to. That job compares the pinned version against rumdl's
+latest release, and there is no way to tell it the tap is behind on purpose, so
+its failure is the expected state for as long as the withdrawal stands.
 
 ## Changing a guard script
 

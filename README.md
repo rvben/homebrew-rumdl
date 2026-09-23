@@ -12,14 +12,20 @@ brew install rvben/rumdl/rumdl
 The fully qualified name is what installs from this tap. rumdl is also a
 [homebrew-core](https://github.com/Homebrew/homebrew-core/blob/HEAD/Formula/r/rumdl.rb)
 formula, and the bare name resolves to that one even with this tap added, so
-`brew install rumdl` installs the core formula (which ships prebuilt bottles):
+`brew install rumdl` installs the core formula:
 
 ```bash
 brew install rumdl
 ```
 
-Either is a fine way to get rumdl. The core formula is usually the easier one,
-since it installs from a bottle instead of downloading a release tarball.
+Either is a fine way to get rumdl, and which one is less work depends on the
+machine. The core formula bottles Apple silicon and both Linux architectures, and
+installs those without a compiler. It ships no Intel macOS bottle and declares
+`depends_on "rust" => :build`, so on an Intel Mac `brew install rumdl` builds
+rumdl from source with a Rust toolchain. This tap pins a prebuilt release binary
+for all four platforms, Intel macOS included, and only ever downloads and unpacks
+one. Which bottles core ships can change with any of its releases, and its
+`bottle do` block is the current answer.
 
 Only one of them at a time, though: Homebrew refuses to have two formulae of the
 same name from different taps installed together, so trying the second one after
