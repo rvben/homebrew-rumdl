@@ -61,6 +61,22 @@ assert_mutated() { # assert_mutated <file>
   fi
 }
 
+# Two cases build their mutation with python3, and a missing interpreter is the
+# one failure `assert_mutated` cannot see: the heredoc writes an EMPTY file, which
+# differs from the formula, so the mutation looks real. verify-formula.sh then
+# exits 1 on "no url/sha256 pairs found" and the case reports the guard as broken
+# for want of the message it expected. Failing closed while naming the wrong cause
+# is how this suite would mislead a contributor, so say it plainly instead. This
+# repository has already paid for that pattern once: a receipt parse written in
+# python3 silently concluded "nothing is installed" on a Homebrew image that had
+# none.
+command -v python3 >/dev/null 2>&1 || {
+  echo "error: python3 is required by this suite and is not on PATH." >&2
+  echo "       Two cases build their mutated formula with it. Without it they" >&2
+  echo "       would test an empty file and blame the guard under test." >&2
+  exit 1
+}
+
 # A curl that cannot succeed, so the structural checks are all that runs. Exit 6
 # is curl's own "could not resolve host", which is what an offline run would give
 # anyway.

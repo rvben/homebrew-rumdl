@@ -66,7 +66,9 @@ platform dropped with its pin, a url pointing at someone else's release, a
 version that only looks valid on its first line - and requires the guard to
 reject each one with the message belonging to the check under test, so a mutation
 caught by the wrong check counts as a failure. It is offline, hermetic and takes
-seconds.
+seconds. It needs `python3` for two of its mutations, and says so up front if it
+is missing, because those two cases would otherwise hand the guard an empty file
+and report the guard as broken.
 
 ```bash
 ./scripts/test-guards.sh
