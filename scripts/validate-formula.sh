@@ -192,13 +192,30 @@ echo "==> The installed binary lints ($RUMDL)"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-printf '# Heading\nNo blank line below the heading.\n' > "$tmp/test.md"
-# Expected to report MD022, so a zero exit here would mean the binary found
-# nothing wrong with a file that is wrong.
-if "$RUMDL" check "$tmp/test.md"; then
-  echo "error: rumdl reported no issues on a file that violates MD022" >&2
-  exit 1
-fi
+printf '# Heading\nNo blank line below the heading.\n' > "$tmp/bad.md"
+printf '# Heading\n\nA blank line below the heading.\n' > "$tmp/good.md"
+
+# Two bounds, and the exit code read exactly rather than as "nonzero". rumdl
+# exits 1 for violations, 0 for a clean file and 2 when it cannot run at all -
+# so `if ! rumdl check` accepted a config error, a missing argument or a crash as
+# proof that the binary detects MD022. Verified: an unparseable .rumdl.toml exits
+# 2 having linted nothing. --no-config for the same reason as in the formula's
+# test do: otherwise this depends on whatever config discovery walks up into.
+smoke() { # smoke <file> <expected exit> <expected substring>
+  # Inside the `if`, because `out="$(cmd)"` under set -e aborts the moment cmd
+  # exits nonzero - which is every interesting case here, including the one this
+  # check exists for.
+  if out="$("$RUMDL" check --no-config "$1" 2>&1)"; then code=0; else code=$?; fi
+  if [ "$code" != "$2" ] || ! printf '%s' "$out" | grep -q "$3"; then
+    echo "error: $RUMDL check ${1##*/} exited $code (want $2)" >&2
+    echo "       and its output ${3:+did not contain \"$3\"}" >&2
+    printf '%s\n' "$out" | sed 's/^/       /' >&2
+    exit 1
+  fi
+  echo "    ${1##*/}: exit $code, output mentions $3"
+}
+smoke "$tmp/bad.md" 1 MD022
+smoke "$tmp/good.md" 0 Success
 echo
 
 echo "All checks passed, install and test included."
