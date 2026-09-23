@@ -3240,8 +3240,19 @@ case_run "untracked files hidden by the clone's own config are not cleaned away"
   "holds work this would destroy" validate-formula.sh < "$FORMULA"
 
 # The same suppression inherited from the environment, the form it takes when this
-# script runs from a hook or a wrapper. Requiring the announcement as well pins
-# which half of the fix answered: the status flag alone would refuse silently.
+# script runs from a hook or a wrapper.
+#
+# What this case binds, stated accurately because the obvious reading is wrong:
+# the announcement is printed one line BEFORE the overrides are cleared, so
+# requiring its text pins that the run announced the clearing, not that the
+# clearing happened. Delete only the `unset` and this case still passes, because
+# `--untracked-files=normal` sees the untracked files whatever the inherited
+# config says, and the run refuses for that reason. The two layers are deliberate
+# and either one refuses this fixture on its own.
+#
+# The clearing itself is bound by the GIT_DIR case above, which is the form no
+# explicit status flag can neutralise: with the `unset` deleted, that case is the
+# one that fails and this one does not.
 CASE_SETUP=setup_clone_untracked_suppressed_by_env
 CASE_ENV=case_env_suppress_untracked
 CASE_STUBS=stubs_validator

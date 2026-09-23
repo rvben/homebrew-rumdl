@@ -72,12 +72,15 @@ jobs:
       - name: The scripts are free of shell defects
         env:
           # The version this job is expected to find, asserted rather than printed.
-          # scripts/validate-formula.sh tells contributors that CI's shellcheck is
-          # OLDER and stricter than a current local one, and names this version; a
-          # runner-image bump would make that note false with nothing failing, and
-          # the first symptom would be a lint that passes locally and fails here.
-          # Bumping is a decision to take deliberately: re-read that note, re-run
-          # the lint against the new version, then change this.
+          # Two notes tell contributors that CI's shellcheck is OLDER and stricter
+          # than a current local one, and both name this version: the one in
+          # scripts/validate-formula.sh and the one in CONTRIBUTING.md. A
+          # runner-image bump would make both false with nothing failing, and the
+          # first symptom would be a lint that passes locally and fails here.
+          # Bumping is a decision to take deliberately: re-read those notes, re-run
+          # the lint against the new version, then change all three together. The
+          # error below names every copy, because a message naming only one leaves
+          # the others to go stale unmentioned.
           SHELLCHECK_EXPECTED: 0.9.0
         run: |
           set -euo pipefail
@@ -88,7 +91,7 @@ jobs:
           version="$(shellcheck --version | awk '/^version:/ { print $2 }')"
           echo "shellcheck $version"
           if [ "$version" != "$SHELLCHECK_EXPECTED" ]; then
-            echo "::error::this runner has shellcheck $version, not the $SHELLCHECK_EXPECTED that scripts/validate-formula.sh documents to contributors. Re-read that note, re-run the lint against $version, and update both together."
+            echo "::error::this runner has shellcheck $version, not the $SHELLCHECK_EXPECTED that two notes document to contributors. Re-run the lint against $version, then update all three copies together: SHELLCHECK_EXPECTED in this workflow, the note in scripts/validate-formula.sh, and the note in CONTRIBUTING.md."
             exit 1
           fi
           shellcheck scripts/*.sh
