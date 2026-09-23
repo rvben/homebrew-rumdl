@@ -170,6 +170,18 @@ while IFS= read -r url; do
   # in one day. rumdl's release workflow publishes Sigstore build provenance, so
   # the stronger statement is available for the asking, and asking costs one
   # call per platform.
+  #
+  # --source-ref is what binds the attestation to the version being pinned.
+  # Without it the check answers "these bytes are a genuine rvben/rumdl release
+  # build", which every past release also satisfies: measured, the command
+  # without the flag accepts v0.2.76's x86_64-apple-darwin tarball while pinning
+  # v0.2.77 (exit 0), and refuses it with the flag (`expected
+  # SourceRepositoryRef to be refs/tags/v0.2.77, got refs/tags/v0.2.76`). That is
+  # reachable whenever the bytes at a v$VERSION url are another release's, which
+  # is the mutable-asset case this repository already treats as real. Nothing
+  # downstream would notice: verify-formula.sh's tar, `file` and architecture
+  # checks all pass for another version's binary of the same target, and it
+  # cannot execute three of the four.
   if [ "${ALLOW_UNATTESTED:-0}" = "1" ]; then
     printf '    provenance check skipped (ALLOW_UNATTESTED=1)\n'
   elif ! command -v gh >/dev/null 2>&1; then
@@ -179,11 +191,25 @@ while IFS= read -r url; do
     exit 1
   elif ! gh attestation verify "$tmp/asset" \
       --repo rvben/rumdl \
-      --signer-workflow "$SIGNER_WORKFLOW" > "$tmp/attestation.log" 2>&1; then
-    echo "error: $asset has no valid build provenance from rvben/rumdl" >&2
-    echo "       Expected an attestation signed by $SIGNER_WORKFLOW." >&2
+      --signer-workflow "$SIGNER_WORKFLOW" \
+      --source-ref "refs/tags/v$VERSION" > "$tmp/attestation.log" 2>&1; then
+    # An unknown flag is a different fact from an asset that fails the check, and
+    # reporting it as the latter would send someone looking at the release
+    # instead of at their gh. --source-ref exists from gh 2.68.0.
+    if grep -q 'unknown flag: --source-ref' "$tmp/attestation.log"; then
+      echo "error: this gh cannot bind an attestation to a tag: no --source-ref" >&2
+      echo "       $(gh --version | head -1)" >&2
+      echo "       gh 2.68.0 or newer is required. Without that flag the check would" >&2
+      echo "       accept any genuine rumdl build, including another version's binary" >&2
+      echo "       served under a v$VERSION url." >&2
+      exit 1
+    fi
+    echo "error: $asset has no valid build provenance for v$VERSION from rvben/rumdl" >&2
+    echo "       Expected an attestation signed by $SIGNER_WORKFLOW," >&2
+    echo "       for refs/tags/v$VERSION." >&2
     sed 's/^/       /' "$tmp/attestation.log" >&2
-    echo "       Refusing to pin bytes that cannot be traced to a rumdl build." >&2
+    echo "       Refusing to pin bytes that cannot be traced to a rumdl build" >&2
+    echo "       of this version." >&2
     exit 1
   else
     printf '    provenance ok\n'

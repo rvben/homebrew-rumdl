@@ -373,6 +373,10 @@ done
 [ -n "$out" ] && [ -n "$url" ] || { echo "stub curl: no -o or no url in: $*" >&2; exit 2; }
 target="$(printf '%s' "$url" | sed -e 's|.*/rumdl-v[0-9][0-9.]*-||' -e 's|\.tar\.gz$||')"
 here="$(dirname "$0")"
+# The version in the url just served, for the gh stub beside this one: the
+# provenance call that follows a download is about those bytes, so the tag it
+# asks about has to be the tag whose url produced them.
+printf '%s' "$url" | sed -n 's|.*/download/v\([0-9][0-9.]*\)/.*|\1|p' > "$here/curl.last-version"
 count="$here/curl.count"
 n=$(( $(cat "$count" 2>/dev/null || echo 0) + 1 ))
 printf '%s' "$n" > "$count"
@@ -400,16 +404,30 @@ write_gh_stub() { # write_gh_stub <stubdir>
 case "$1 $2" in
   "auth status") exit 0 ;;
 esac
-want="$(cat "$(dirname "$0")/gh.signer")"
+here="$(dirname "$0")"
+want="$(cat "$here/gh.signer")"
 got=""
+ref=""
 prev=""
 for a in "$@"; do
   [ "$prev" = "--signer-workflow" ] && got="$a"
+  [ "$prev" = "--source-ref" ] && ref="$a"
   prev="$a"
 done
 if [ "$got" != "$want" ]; then
   echo "no attestation matching the signer workflow" >&2
   echo "this stub attests $want; the run asked for '$got'" >&2
+  exit 1
+fi
+# Real gh checks the attestation of the bytes it was handed, so this stub attests
+# the release whose url produced them, and only that release. A run that asked
+# about some other tag - or about no tag at all - would pass a stub that ignored
+# the flag while refusing every real asset at release time, which is the failure
+# the signer-workflow requirement above already exists to prevent.
+want_ref="refs/tags/v$(cat "$here/curl.last-version" 2>/dev/null)"
+if [ "$ref" != "$want_ref" ]; then
+  echo "no attestation for the tag the run asked about" >&2
+  echo "this stub attests $want_ref; the run asked about '$ref'" >&2
   exit 1
 fi
 exit 0
@@ -501,8 +519,50 @@ STUB
   chmod +x "$1/gh"
 }
 
+# A gh that answers as GitHub would for bytes carrying a real rumdl release
+# attestation from a DIFFERENT tag: the release asset at the v<new> url is in fact
+# another version's binary. Asked only for the signer workflow it succeeds, because
+# the build genuinely is a rumdl release build; asked which tag it was built from it
+# names the other one. So --source-ref, not the presence of an attestation, is what
+# has to refuse this. Measured against real gh and real assets before this stub was
+# written: v0.2.76's x86_64-apple-darwin tarball passes the updater's check without
+# the flag and fails it with --source-ref refs/tags/v0.2.77.
+write_gh_stub_other_version() { # <stubdir> <tag the bytes are attested at>
+  printf '%s\n' "rvben/rumdl/.github/workflows/release.yml" > "$1/gh.signer"
+  printf '%s\n' "$2" > "$1/gh.attested-ref"
+  cat > "$1/gh" <<'STUB'
+#!/bin/sh
+case "$1 $2" in
+  "auth status") exit 0 ;;
+esac
+here="$(dirname "$0")"
+want="$(cat "$here/gh.signer")"
+attested="$(cat "$here/gh.attested-ref")"
+got=""
+ref=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--signer-workflow" ] && got="$a"
+  [ "$prev" = "--source-ref" ] && ref="$a"
+  prev="$a"
+done
+if [ "$got" != "$want" ]; then
+  echo "no attestation matching the signer workflow" >&2
+  exit 1
+fi
+if [ -n "$ref" ] && [ "$ref" != "$attested" ]; then
+  echo "Error: expected SourceRepositoryRef to be $ref, got $attested" >&2
+  exit 1
+fi
+exit 0
+STUB
+  chmod +x "$1/gh"
+}
+
 stubs_attested_first_only() { write_curl_stub "$1" "$WORK/assets"
   write_gh_stub_first_only "$1"; write_file_stub "$1"; }
+stubs_attested_other_version() { write_curl_stub "$1" "$WORK/assets"
+  write_gh_stub_other_version "$1" "refs/tags/v$CUR_VERSION"; write_file_stub "$1"; }
 stubs_attested_wrong_signer() { write_curl_stub "$1" "$WORK/assets"
   write_gh_stub_wrong_signer "$1"; write_file_stub "$1"; }
 # Four downloads to pin, then verification downloads all four again: this serves
@@ -2537,7 +2597,7 @@ case_run "a full update pins each url to the bytes that url fetched" 0 \
 CASE_STUBS=stubs_attested_first_only
 CASE_ASSERT=assert_first_asset_cleared_provenance
 case_run "an asset with no build provenance is refused, not pinned" 1 \
-  "has no valid build provenance from rvben/rumdl" \
+  "has no valid build provenance for v$OTHER_VERSION from rvben/rumdl" \
   update-formula.sh "$OTHER_VERSION" < "$FORMULA"
 
 # An asset that IS attested, by a workflow that is not rumdl's release
@@ -2550,7 +2610,25 @@ case_run "an asset with no build provenance is refused, not pinned" 1 \
 CASE_STUBS=stubs_attested_wrong_signer
 CASE_ASSERT=assert_formula_untouched
 case_run "an asset attested by the wrong workflow is refused" 1 \
-  "has no valid build provenance from rvben/rumdl" \
+  "has no valid build provenance for v$OTHER_VERSION from rvben/rumdl" \
+  update-formula.sh "$OTHER_VERSION" < "$FORMULA"
+
+# An asset that IS attested, by rumdl's own release workflow, for a DIFFERENT
+# release: the bytes at the v$OTHER_VERSION url are v$CUR_VERSION's binary. This is
+# the mutable-asset case one step further than the re-pin guard below - not a
+# version re-run, but another version's build arriving under this version's url -
+# and everything except the tag binding is satisfied by it. The pin would be the
+# hash of what the url served, the archive unpacks, `file` reports the right
+# architecture for the branch, and three of the four binaries cannot be executed
+# here at all; the only other check that would notice is `test do`'s
+# `assert_match "rumdl #{version}"`, in CI, after the bot has already pushed.
+# Expected on gh's own wording for the mismatch, because that line is what
+# distinguishes this refusal from every other provenance refusal: the run only
+# prints it if it asked which tag the bytes came from.
+CASE_STUBS=stubs_attested_other_version
+CASE_ASSERT=assert_formula_untouched
+case_run "an asset attested for another version is refused" 1 \
+  "expected SourceRepositoryRef to be refs/tags/v$OTHER_VERSION" \
   update-formula.sh "$OTHER_VERSION" < "$FORMULA"
 
 # The v0.2.76 case itself: the formula already names this version, and the
