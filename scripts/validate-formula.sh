@@ -41,13 +41,20 @@ command -v brew >/dev/null 2>&1 || {
 # which is a lint that passes locally and fails in CI. So a clean run here is not a
 # promise of a clean `pins` job on an older shellcheck.
 echo "==> The scripts are free of shell defects"
-command -v shellcheck >/dev/null 2>&1 || {
-  echo "error: shellcheck is not installed, and CI runs it over every script." >&2
-  echo "       brew install shellcheck" >&2
-  exit 1
-}
-shellcheck --version | sed -n 2p
-shellcheck scripts/*.sh
+if command -v shellcheck >/dev/null 2>&1; then
+  shellcheck --version | sed -n 2p
+  shellcheck scripts/*.sh
+else
+  # Reported, not silently skipped and not fatal. The gate is CI's `pins` job,
+  # which requires shellcheck and runs on a runner that has it; this call is the
+  # local convenience copy. Making it fatal here broke both macOS brew jobs on the
+  # first push, because the GitHub macOS images carry no shellcheck, and
+  # `brew install shellcheck` in four jobs to re-run what `pins` already ran is
+  # cost for nothing. What matters is that a run without it says so rather than
+  # reporting a clean lint.
+  echo "    shellcheck is not installed, so the shell lint did NOT run here."
+  echo "    CI's pins job is the gate for it. Locally: brew install shellcheck"
+fi
 echo
 
 # Before the check, the checker - the same order as CI's `pins` job, because this

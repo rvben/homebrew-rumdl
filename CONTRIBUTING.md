@@ -85,14 +85,19 @@ passes both before and after proves nothing.
 ./scripts/validate-formula.sh --install  # also install, test, lint these docs
 ```
 
-This runs what CI runs, in the same order, `shellcheck` and
-`scripts/test-guards.sh` included, so a guard-script regression cannot pass
-locally and fail only in CI. Three things to know:
+This runs what CI runs, in the same order, `scripts/test-guards.sh` included, so
+a guard-script regression cannot pass locally and fail only in CI. Three things
+to know:
 
-- A clean `shellcheck` here is not a promise of a clean one in CI. The runner
-  ships 0.9.0, a Homebrew machine currently has 0.11.0, and the older version is
-  the stricter of the two: it rejected an `A && B || C` line that the newer one
-  accepted silently. CI is the authority.
+- The shell lint runs here too when `shellcheck` is installed, and says plainly
+  that it did not run when it is absent rather than reporting a clean lint. The
+  gate for it is the `pins` job: GitHub's macOS images carry no `shellcheck`, so
+  requiring it in this script broke both macOS `brew` jobs, and installing it
+  four times over to repeat a lint `pins` has already run buys nothing. A clean
+  run here is also not a promise of a clean one in CI: the runner ships 0.9.0, a
+  Homebrew machine currently has 0.11.0, and the older version is the stricter of
+  the two, having rejected an `A && B || C` line that the newer one accepted
+  silently. CI is the authority.
 - `brew tap --force rvben/rumdl <path>` clones the repository, so the `brew`
   checks see `HEAD`, not your uncommitted changes. Commit first if you want brew
   to see your edit. The pin check at the start reads the working tree directly,
