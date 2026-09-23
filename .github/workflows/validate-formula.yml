@@ -52,6 +52,14 @@ jobs:
   # which leaves x86_64-apple-darwin and aarch64 Linux unchecked by it entirely.
   pins:
     runs-on: ubuntu-latest
+    # Every job here is capped, because none of them is allowed to cost a runner
+    # for the six hours GitHub gives an uncapped one. The daily schedule is what
+    # makes that more than a thought experiment: a `brew install` waiting on a
+    # network read, or an `--online` audit against an unresponsive host, would
+    # hang unattended once a day. The caps are generous multiples of the observed
+    # run times, so hitting one means something stopped making progress rather
+    # than that the work grew.
+    timeout-minutes: 15
     steps:
       - name: Checkout tap
         uses: actions/checkout@v6
@@ -126,6 +134,7 @@ jobs:
   # silently behind with both repositories green.
   freshness:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout tap
@@ -163,6 +172,9 @@ jobs:
         # Tier 1 Homebrew platform.
         os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
+    # The widest cap: this job installs from source on a cold macOS runner and
+    # then audits the formula against the network.
+    timeout-minutes: 45
 
     steps:
       - name: Checkout tap

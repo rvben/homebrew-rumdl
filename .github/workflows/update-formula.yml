@@ -27,6 +27,10 @@ concurrency:
 jobs:
   update-formula:
     runs-on: ubuntu-latest
+    # Capped for the reason the validation workflow's jobs are, and lower: this
+    # job rewrites pins and pushes. An hour of it waiting on a fetch is an hour
+    # the concurrency group above holds every queued release behind it.
+    timeout-minutes: 15
     steps:
       # `main` rather than the event's commit. A second release dispatched
       # before the first one pushes waits in the concurrency queue above, and
