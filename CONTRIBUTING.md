@@ -74,6 +74,13 @@ This runs what CI runs, in the same order. Two things to know:
 - It taps `rvben/rumdl` from your local checkout, which changes your local
   Homebrew state. `brew untap rvben/rumdl` afterwards if you would rather it did
   not.
+- If you already have the tap, it refreshes that clone from your checkout instead
+  of re-tapping, because `brew tap --force` on an already-tapped name does
+  nothing and brew would keep checking the old commit. `brew edit
+  rvben/rumdl/rumdl` edits exactly that clone, so the refresh stops rather than
+  overwrite anything it finds there: uncommitted changes, untracked files, or
+  commits your checkout does not have. Stash them, copy them into your checkout,
+  or discard them deliberately with `DISCARD_TAP_CLONE=1`.
 
 ## Continuous integration
 

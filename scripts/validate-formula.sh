@@ -63,6 +63,26 @@ if brew tap | grep -qx rvben/rumdl; then
   }
   echo "==> Refreshing the existing rvben/rumdl tap clone from $TAP_DIR"
   git -C "$tap_repo" fetch --quiet "$TAP_DIR" HEAD
+
+  # The refresh discards whatever is in that clone, and `brew edit
+  # rvben/rumdl/rumdl` edits precisely this clone - it is where a contributor's
+  # experiment plausibly lives. So look before overwriting: uncommitted changes,
+  # untracked files, and commits the clone has that this checkout does not.
+  dirty="$(git -C "$tap_repo" status --porcelain)"
+  ahead="$(git -C "$tap_repo" rev-list --count FETCH_HEAD..HEAD 2>/dev/null || echo 0)"
+  if { [ -n "$dirty" ] || [ "$ahead" != "0" ]; } && [ "${DISCARD_TAP_CLONE:-0}" = "1" ]; then
+    echo "    DISCARD_TAP_CLONE=1: discarding $(printf '%s' "$dirty" | grep -c . ) changed path(s) and $ahead local commit(s)"
+  elif [ -n "$dirty" ] || [ "$ahead" != "0" ]; then
+    echo "error: the rvben/rumdl tap clone holds work this would destroy" >&2
+    echo "       $tap_repo" >&2
+    [ -n "$dirty" ] && printf '%s\n' "$dirty" | sed 's/^/         /' >&2
+    [ "$ahead" != "0" ] && echo "         $ahead commit(s) not in $TAP_DIR" >&2
+    echo "       Refreshing it means reset --hard and clean -fd, so this stops here." >&2
+    echo "       Keep the work (git -C \"$tap_repo\" stash, or copy it into $TAP_DIR)," >&2
+    echo "       or discard it deliberately with DISCARD_TAP_CLONE=1 $0 $*" >&2
+    exit 1
+  fi
+
   git -C "$tap_repo" reset --hard --quiet FETCH_HEAD
   git -C "$tap_repo" clean -qfd
   echo "    tap clone now at $(git -C "$tap_repo" rev-parse --short HEAD)"
