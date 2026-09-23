@@ -39,13 +39,18 @@ class Rumdl < Formula
 
   def install
     bin.install "rumdl"
+    # Same as homebrew-core's rumdl formula, so a user moving between the two
+    # keeps working `rumdl <TAB>` completions instead of silently losing them.
+    generate_completions_from_executable(bin/"rumdl", "completions")
   end
 
   test do
-    # Test version output
     assert_match "rumdl #{version}", shell_output("#{bin}/rumdl --version")
 
-    # Test that rumdl successfully checks valid markdown (exit code 0)
+    # --no-config on both runs: without it these assertions depend on no config
+    # file being discovered by walking up from the test's working directory,
+    # which is true on a CI runner and not necessarily true on a contributor's
+    # machine.
     (testpath/"valid.md").write <<~EOS
       # Valid Heading
 
@@ -55,17 +60,20 @@ class Rumdl < Formula
       - List item 2
     EOS
 
-    output = shell_output("#{bin}/rumdl check #{testpath}/valid.md")
-    assert_match "No issues found", output
+    assert_match "Success", shell_output("#{bin}/rumdl check --no-config #{testpath}/valid.md")
 
-    # Test that rumdl detects issues in invalid markdown (exit code 1)
     (testpath/"invalid.md").write <<~EOS
       # Bad Heading
       Missing blank line below heading
     EOS
 
-    output = shell_output("#{bin}/rumdl check #{testpath}/invalid.md 2>&1", 1)
+    # The rule id and the exit status, and deliberately not the wording of the
+    # message. Asserting the sentence "Expected 1 blank line below heading" tied
+    # this formula to a format string in another repository
+    # (src/rules/md022_blanks_around_headings.rs), so any rewording of a
+    # diagnostic there would fail validation here, after release, pointing at the
+    # formula instead of at the commit that caused it.
+    output = shell_output("#{bin}/rumdl check --no-config #{testpath}/invalid.md 2>&1", 1)
     assert_match "MD022", output
-    assert_match "Expected 1 blank line below heading", output
   end
 end
