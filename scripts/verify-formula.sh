@@ -188,15 +188,26 @@ while IFS="$(printf '\t')" read -r url want; do
     # whose layout or binary name changed satisfies every check above and then
     # fails at install time for every user on that platform. One `tar` listing
     # per asset turns that into a pre-push failure.
-    if tar tzf "$tmp/asset.$n" 2>/dev/null | sed 's|/.*||' | sort -u | grep -qx rumdl; then
+    #
+    # Matched against the whole entry, with only a leading `./` removed: a
+    # directory lists as `rumdl/`, so trimming at the first slash accepted an
+    # archive holding a `rumdl/` directory and no binary at all. And the name
+    # alone is not the requirement either - `bin.install` needs a file it can
+    # install, so the member is extracted and checked for being a non-empty
+    # regular file with an execute bit.
+    if tar tzf "$tmp/asset.$n" 2>/dev/null | sed 's|^\./||' | grep -qx rumdl &&
+       rm -rf "$tmp/x.$n" && mkdir -p "$tmp/x.$n" &&
+       tar xzf "$tmp/asset.$n" -C "$tmp/x.$n" 2>/dev/null &&
+       [ -f "$tmp/x.$n/rumdl" ] && [ -s "$tmp/x.$n/rumdl" ] && [ -x "$tmp/x.$n/rumdl" ]; then
       echo "ok    $asset"
     else
       echo "FAIL  $asset"
-      echo "      hash matches, but the archive has no top-level 'rumdl' entry"
+      echo "      hash matches, but the archive has no installable 'rumdl' binary"
       echo "      contents:   $(tar tzf "$tmp/asset.$n" 2>/dev/null | head -5 | tr '\n' ' ')"
       echo "      def install does bin.install \"rumdl\", so this cannot install"
       failed=1
     fi
+    rm -rf "$tmp/x.$n"
   else
     echo "FAIL  $asset"
     echo "      pinned:     $want"
