@@ -19,13 +19,14 @@ brew install rumdl
 ```
 
 Either is a fine way to get rumdl, and which one is less work depends on the
-machine. The core formula bottles Apple silicon and both Linux architectures, and
-installs those without a compiler. It ships no Intel macOS bottle and declares
-`depends_on "rust" => :build`, so on an Intel Mac `brew install rumdl` builds
-rumdl from source with a Rust toolchain. This tap pins a prebuilt release binary
-for all four platforms, Intel macOS included, and only ever downloads and unpacks
-one. Which bottles core ships can change with any of its releases, and its
-`bottle do` block is the current answer.
+machine. The core formula bottles both Linux architectures and the recent Apple
+silicon macOS releases (`arm64_sequoia`, `arm64_tahoe`, `arm64_golden_gate`), and
+installs those without a compiler. Every other machine it builds from source with
+a Rust toolchain, because it declares `depends_on "rust" => :build` and has no
+Intel macOS bottle and none for macOS older than those three. This tap pins a
+prebuilt release binary for all four platforms and only ever downloads and unpacks
+one, whatever the machine. Which machines get a bottle changes with core's
+releases, so its `bottle do` block is the current answer.
 
 Only one of them at a time, though: Homebrew refuses to have two formulae of the
 same name from different taps installed together, so trying the second one after
