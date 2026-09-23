@@ -198,13 +198,19 @@ to know:
   repository declares no submodules, so a clone of it has none unless you add
   one by hand, and that leaves a tracked path the inventory above already
   reports.
-- Run it from your own checkout, never from the tap clone. `brew --repository
-  rvben/rumdl` is a full clone of this repository, `scripts/` included, so
-  running it there is easy to reach by accident, and then the directory being
-  refreshed is the directory whose formula was just read: with
-  `DISCARD_TAP_CLONE=1` your uncommitted formula is discarded and the run reports
-  pins for the bytes that replaced it. The script checks for that and refuses
-  before it taps anything.
+- Commit the formula before running it from inside the tap clone. `brew
+  --repository rvben/rumdl` is a full clone of this repository, `scripts/`
+  included, so running it there is easy to reach by accident, and then the
+  directory being refreshed is the directory whose formula was just read: with
+  `DISCARD_TAP_CLONE=1` your uncommitted formula is discarded and the run
+  reports pins for the bytes that replaced it. So the script asks, before it
+  taps anything, whether this checkout is itself the tap clone - comparing both
+  paths resolved, since a tap is usually reached through a symlink - and there
+  is nothing to refresh when it is. The commit being validated is already in
+  that working tree, by identity, so the refresh is skipped and the brew checks
+  read these bytes. That is also the shape CI runs in: the runner's workspace is
+  the tap. With the formula uncommitted it stops instead, because then brew
+  would audit your edit while every line of the report names a commit.
 
 ## Continuous integration
 

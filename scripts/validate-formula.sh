@@ -123,6 +123,35 @@ echo "==> Every sha256 is the hash of the artifact its url fetches"
 scripts/verify-formula.sh
 echo
 
+# Are the tap clone and this checkout the same directory? Everything below is built on
+# them being two: the checkout holds the commit being validated, the clone is refreshed
+# onto it, and one is safe to rewrite because the other is not.
+#
+# Two ways they collapse into one, and they need opposite answers. A contributor running
+# `cd "$(brew --repository rvben/rumdl)" && ./scripts/validate-formula.sh` is standing in
+# the clone the refresh would rewrite, which is why this used to refuse outright. But CI
+# is the same topology and is legitimate: Homebrew/actions/setup-homebrew taps the
+# workspace itself, so `brew --repository rvben/rumdl` resolves through a symlink to the
+# checkout, and every brew job refused with `this directory IS the rvben/rumdl tap clone`
+# the first time that guard reached a runner. Measured on all four platforms.
+#
+# The refusal was aimed at the refresh, not at the topology. When the clone IS the
+# checkout there is nothing to refresh - it already holds the commit under validation, by
+# identity - so the answer is to skip the refresh rather than to stop. What the refresh
+# would otherwise have destroyed is then never touched, and the byte check below still
+# compares HEAD's blob against the file brew reads, which is what catches a dirty formula
+# in this topology.
+#
+# Asked before anything is tapped or refreshed. `pwd -P` on both sides so a symlinked
+# path is not mistaken for a different directory - which is exactly how CI presents - and
+# `|| true` because an older brew may have nothing to say about a name it has not tapped.
+TAP_IS_CHECKOUT=0
+tap_repo_probe="$(brew --repository rvben/rumdl 2>/dev/null || true)"
+if [ -n "$tap_repo_probe" ] && [ -d "$tap_repo_probe" ] &&
+   [ "$(cd "$tap_repo_probe" && pwd -P)" = "$(cd "$TAP_DIR" && pwd -P)" ]; then
+  TAP_IS_CHECKOUT=1
+fi
+
 # Which formula the brew checks are about to read. Everything above read the
 # working tree; everything below reads a CLONE of this repository at HEAD, and
 # those are the same bytes only while the formula is committed. The difference is
@@ -149,7 +178,20 @@ else
     FORMULA_STATE=uncommitted
   fi
 fi
-if [ "$FORMULA_STATE" = uncommitted ]; then
+if [ "$FORMULA_STATE" = uncommitted ] && [ "$TAP_IS_CHECKOUT" = 1 ]; then
+  # The opposite of the warning below, and a refusal rather than a warning, because here
+  # brew reads this working tree: the edit IS what would be audited, while every line
+  # this run prints about it names a commit. The byte check further down refuses the same
+  # shape, but it refuses after the brew checks have been set up; saying it here keeps
+  # the reason attached to the state that causes it.
+  echo "error: Formula/rumdl.rb differs from HEAD ($HEAD_SHA), and this checkout IS" >&2
+  echo "       the rvben/rumdl tap clone" >&2
+  echo "       $TAP_DIR" >&2
+  echo "       So brew would audit, install and test your uncommitted edit while this" >&2
+  echo "       run reported on $HEAD_SHA. Commit it, or run from a checkout that is not" >&2
+  echo "       the tap clone." >&2
+  exit 1
+elif [ "$FORMULA_STATE" = uncommitted ]; then
   echo "==> WARNING: Formula/rumdl.rb differs from HEAD ($HEAD_SHA)"
   echo "    The pin check above read your working tree. Every brew check below"
   echo "    reads a clone of this repository at HEAD, so your edit is NOT what"
@@ -178,38 +220,23 @@ elif [ "$FORMULA_STATE" = unknown ]; then
   exit 1
 fi
 
-# Everything below is built on the tap clone and this checkout being two directories:
-# the checkout holds the commit being validated, the clone is refreshed onto it, and one
-# is safe to rewrite because the other is not. Running this script from inside the tap
-# clone collapses that. The clone is a full clone of this repository, scripts included,
-# so `cd "$(brew --repository rvben/rumdl)" && ./scripts/validate-formula.sh` is a
-# reasonable thing for someone to try, and it has two bad outcomes and no good one. With
-# DISCARD_TAP_CLONE=1 the pin check reads the working tree, the reset then puts HEAD's
-# bytes back over it, and the run exits 0 reporting pins that belong to the formula it
-# just discarded - the byte check cannot see it, since it is comparing HEAD against
-# HEAD. Without the hatch it refuses over the contributor's own uncommitted work and
-# tells them to stash it into the directory they are already standing in.
-#
-# Asked before anything is tapped or refreshed, because after the refresh the damage is
-# done. `pwd -P` on both sides so a symlinked path is not mistaken for a different
-# directory, and `|| true` because an older brew may have nothing to say about a name it
-# has not tapped.
-tap_repo_probe="$(brew --repository rvben/rumdl 2>/dev/null || true)"
-if [ -n "$tap_repo_probe" ] && [ -d "$tap_repo_probe" ] &&
-   [ "$(cd "$tap_repo_probe" && pwd -P)" = "$(cd "$TAP_DIR" && pwd -P)" ]; then
-  echo "error: this directory IS the rvben/rumdl tap clone" >&2
-  echo "       $TAP_DIR" >&2
-  echo "       The brew checks below read a clone of the commit being validated, and" >&2
-  echo "       here that clone would be this working tree: refreshing it would rewrite" >&2
-  echo "       the formula the pin check just read, and with DISCARD_TAP_CLONE=1 it" >&2
-  echo "       would discard your uncommitted work and then report on the formula it" >&2
-  echo "       restored. Run it from your own checkout of the repository instead." >&2
-  exit 1
-fi
-
 # brew audit/style need the formula to be reachable as a tap. This changes local
 # Homebrew state, which is why it happens after the check that does not.
-if brew tap | grep -qx rvben/rumdl; then
+if [ "$TAP_IS_CHECKOUT" = 1 ]; then
+  # The clone and the checkout are one directory, so the refresh is skipped entirely:
+  # no fetch, no inventory, no reset, no checkout. It would have nothing to do that is
+  # not already true, and everything it could do would be to this working tree.
+  #
+  # The tap is necessarily registered already - a directory only answers to
+  # `brew --repository rvben/rumdl` because brew tapped it - so there is nothing to tap
+  # either.
+  tap_repo="$tap_repo_probe"
+  echo "==> Not refreshing the rvben/rumdl tap clone: it IS this checkout"
+  echo "    $tap_repo"
+  echo "    So it already holds the commit being validated, and the brew checks below"
+  echo "    read these bytes."
+  echo
+elif brew tap | grep -qx rvben/rumdl; then
   # Already tapped, which is the normal state for anyone who has run this before.
   # `brew tap --force` does nothing whatsoever here - Homebrew rescues
   # TapAlreadyTappedError and returns, printing nothing - so every brew check

@@ -1131,6 +1131,20 @@ setup_clone_cherry_pick_sequence() {
 # collapse costs something in: the pin check reads the edit, the reset puts HEAD's bytes
 # back over it, and the run reports pins for a formula it discarded. The stub points brew
 # at the case directory itself; the tap-clone the fixture builds is never reached.
+setup_checkout_is_the_tap_committed() {
+  setup_tap_clone "$1" || return 1
+  # CI's topology, and the reason this is a passing case rather than a refusal:
+  # Homebrew/actions/setup-homebrew taps the workspace itself, so
+  # `brew --repository rvben/rumdl` resolves - through a symlink - to the very checkout
+  # the run is validating. Nothing is uncommitted, because a runner checked out a commit.
+  scratch_git -C "$1" rev-parse HEAD > "$1/checkout-head.txt" || return 1
+  cp "$1/Formula/rumdl.rb" "$1/checkout-formula.rb" || return 1
+  if [ -e "$1/.git/FETCH_HEAD" ]; then
+    echo "harness: the checkout already has a FETCH_HEAD, so this case cannot show that" >&2
+    echo "harness: nothing was fetched" >&2
+    return 1
+  fi
+}
 setup_checkout_is_the_tap() {
   setup_clone_uncommitted_formula "$1" || return 1
   cp "$1/Formula/rumdl.rb" "$1/checkout-formula.rb" || return 1
@@ -1427,9 +1441,19 @@ stubs_validator_no_rev_list() { stubs_validator "$1"; write_git_stub_no_rev_list
 stubs_validator_untapped()        { write_validator_stubs "$1"; write_brew_stub_untapped "$1" "${1%/stub}/tap-clone"; }
 stubs_validator_untapped_eol()    { write_validator_stubs "$1"; write_brew_stub_untapped "$1" "${1%/stub}/tap-clone" eol; }
 stubs_validator_untapped_absent() { write_validator_stubs "$1"; write_brew_stub_untapped "$1" "${1%/stub}/tap-clone" absent; }
-# brew answering with the case directory itself, for the one case where the checkout and
-# the tap clone are the same directory.
+# brew answering with the case directory itself, for the cases where the checkout and the
+# tap clone are the same directory.
 stubs_validator_repo_is_checkout() { write_validator_stubs "$1"; write_brew_stub "$1" "${1%/stub}"; }
+# The same topology as brew actually reports it in CI: a symlink. setup-homebrew taps the
+# workspace by linking it under Library/Taps, so `brew --repository rvben/rumdl` answers
+# with a path that only resolves to the checkout once the link is followed. The link is a
+# sibling of the case directory, not inside it, so it cannot become a loop.
+stubs_validator_repo_is_symlink_to_checkout() {
+  local d="${1%/stub}"
+  write_validator_stubs "$1"
+  ln -s "$d" "$d-as-tap" || return 1
+  write_brew_stub "$1" "$d-as-tap"
+}
 stubs_validator_livecheck_unresolved() {
   write_validator_stubs "$1"
   write_brew_livecheck_unresolved "$1" "${1%/stub}/tap-clone"
@@ -1925,18 +1949,25 @@ assert_no_head_refused_before_the_tap() { # <casedir>
   assert_clone_head_unmoved "$1" || bad=1
   # Not assert_refused_before_brew_checks: that one reads the stub's log and treats a
   # missing log as unobservable, which is right for every refusal inside the tap block,
-  # because those run after `brew --repository`. This refusal is earlier than the first
-  # brew call of any kind, so the claim is that brew was never invoked - and the stub
-  # being present and executable is what makes an empty log mean that rather than
-  # meaning the stub was never installed.
+  # because those run after the tap has been refreshed. This refusal is earlier than
+  # anything that changes local Homebrew state, so the claim is that brew was asked
+  # nothing but a question - and the stub being present and executable is what makes a
+  # log with nothing else in it mean that, rather than meaning the stub was never
+  # installed.
+  #
+  # `--repository rvben/rumdl` is allowed, and is the one call expected here: the
+  # topology probe that asks whether this checkout is itself the tap clone runs before
+  # the formula-state checks and only reads a path. Every other subcommand - tap, audit,
+  # style, install, test, livecheck - either changes state or reports on a formula, and
+  # none of them may be reached.
   if [ ! -x "$1/stub/brew" ]; then
     echo "the brew stub is not installed at $1/stub/brew, so 'brew was never invoked'"
     echo "cannot be told apart from 'brew could not have been invoked'"
     bad=1
-  elif [ -s "$1/stub/brew.calls" ]; then
-    echo "the run invoked brew before refusing, and this refusal is supposed to happen"
-    echo "before the tap is consulted at all:"
-    sed 's/^/  /' "$1/stub/brew.calls"
+  elif grep -qv '^--repository ' "$1/stub/brew.calls" 2>/dev/null; then
+    echo "the run asked brew to do something before refusing, and this refusal is"
+    echo "supposed to happen before the tap is touched at all:"
+    grep -v '^--repository ' "$1/stub/brew.calls" | sed 's/^/  /'
     bad=1
   fi
   return "$bad"
@@ -1968,6 +1999,48 @@ assert_clone_sequence_untouched() { # <casedir>
 # The checkout that is also the tap clone. The refusal has to arrive with the contributor's
 # uncommitted formula still where it was: this guard exists because the run would otherwise
 # reset that file and report pins for the bytes it replaced.
+assert_checkout_used_in_place() { # <casedir>
+  local bad=0 want got
+  # The refresh is the only thing in the script that fetches, so a FETCH_HEAD here means
+  # it ran against the directory it was supposed to recognise and leave alone.
+  if [ -e "$1/.git/FETCH_HEAD" ]; then
+    echo "the run fetched into the checkout, so it refreshed the directory it was told"
+    echo "was already the clone:"
+    sed 's/^/  /' "$1/.git/FETCH_HEAD" | head -3
+    bad=1
+  fi
+  want="$(cat "$1/checkout-head.txt" 2>/dev/null)"
+  got="$(scratch_git -C "$1" rev-parse HEAD)"
+  if [ -z "$want" ]; then
+    echo "harness: no recorded checkout HEAD to compare against"
+    return 1
+  fi
+  if [ "$want" != "$got" ]; then
+    echo "the run moved the checkout's own HEAD:"
+    echo "  it was at: $want"
+    echo "  now at:    $got"
+    bad=1
+  fi
+  if ! cmp -s "$1/checkout-formula.rb" "$1/Formula/rumdl.rb"; then
+    echo "the run rewrote the formula in the directory it was run from:"
+    diff "$1/checkout-formula.rb" "$1/Formula/rumdl.rb" | sed 's/^/  /'
+    bad=1
+  fi
+  # And the brew checks actually ran. Everything above is also true of a run that
+  # skipped straight to the end, which is the failure mode of recognising this topology
+  # by doing nothing at all. Positive control first: no stub, no log, and the check
+  # below would pass by being unobservable.
+  if [ ! -x "$1/stub/brew" ]; then
+    echo "harness: no brew stub, so whether the brew checks ran cannot be observed"
+    return 1
+  elif ! grep -q '^audit ' "$1/stub/brew.calls" 2>/dev/null; then
+    echo "the run never asked brew to audit, so recognising this topology skipped the"
+    echo "checks the run exists to perform:"
+    sed 's/^/  /' "$1/stub/brew.calls" 2>/dev/null | head -8
+    bad=1
+  fi
+  return "$bad"
+}
 assert_checkout_formula_untouched() { # <casedir>
   local bad=0
   if [ ! -f "$1/checkout-formula.rb" ]; then
@@ -2767,19 +2840,50 @@ CASE_ASSERT=assert_no_head_refused_before_the_tap
 case_run "a checkout with no HEAD commit is refused before the tap is touched" 1 \
   "has no HEAD commit" validate-formula.sh < "$FORMULA"
 
-# The script run from inside the tap clone, which is one directory doing both jobs. The tap
-# clone is a full clone of this repository, scripts included, so it is a reasonable thing to
-# try, and both outcomes are wrong: with the hatch the pin check reads the working tree, the
-# reset puts HEAD's bytes back over it, and the run exits 0 reporting pins for the formula it
-# discarded - the byte check compares HEAD against HEAD and cannot see it. The assertion is
-# the contributor's edit still being there, since the refusal message alone would also pass
-# on a run that refused after resetting.
+# One directory doing both jobs, which used to be refused outright and is not any more:
+# CI is this topology. setup-homebrew taps the workspace, so every brew job refused with
+# "this directory IS the rvben/rumdl tap clone" the first time that guard reached a runner.
+# The refusal was aimed at the refresh, and with the clone and the checkout identical there
+# is nothing to refresh - the directory already holds the commit being validated - so the
+# run proceeds with the refresh skipped. The assertions are that it was skipped (no fetch,
+# HEAD unmoved, the formula's bytes as they were) AND that the brew checks still ran.
+CASE_SETUP=setup_checkout_is_the_tap_committed
+CASE_STUBS=stubs_validator_repo_is_checkout
+CASE_ASSERT=assert_checkout_used_in_place
+case_run "a checkout that IS the tap clone is validated in place, without a refresh" 0 \
+  "it IS this checkout" validate-formula.sh < "$FORMULA"
+
+# The same case as above with the one difference CI actually has: brew answers with a
+# symlink rather than the directory itself. This is the mechanism the recognition rests on,
+# so it gets its own case - resolving both sides with `pwd -P` is what makes a linked path
+# and its target the same directory, and without it CI falls through to the refresh and
+# rewrites its own workspace instead of being recognised.
+CASE_SETUP=setup_checkout_is_the_tap_committed
+CASE_STUBS=stubs_validator_repo_is_symlink_to_checkout
+CASE_ASSERT=assert_checkout_used_in_place
+case_run "a checkout brew reports through a symlink is recognised as the tap clone" 0 \
+  "it IS this checkout" validate-formula.sh < "$FORMULA"
+
+# The contributor half of that topology, which stays a refusal for the opposite reason to
+# the one above. Running from inside the tap clone with an uncommitted formula, brew reads
+# the edit while every line the run prints names a commit, so a pass would report on
+# $HEAD_SHA for bytes nothing checked. The assertion is the edit still being there, since
+# the refusal message alone would also pass on a run that refused after resetting.
+#
+# The message asserted is one only this refusal prints. "differs from HEAD" was the first
+# choice and was wrong: it is also the wording of the warning for the ordinary
+# uncommitted case, so a control arm with this refusal removed passed all 57 cases - the
+# byte check refuses the same shape further down, with exit 1 and before any brew check,
+# so nothing the case looked at changed. That backstop is why this refusal is about the
+# diagnosis rather than the protection: the byte check blames the clone for rewriting
+# files and recommends re-tapping, advice that cannot help when the cause is that the
+# clone is the checkout.
 CASE_SETUP=setup_checkout_is_the_tap
 CASE_STUBS=stubs_validator_repo_is_checkout
 CASE_ENV=case_env_discard_tap_clone
 CASE_ASSERT=assert_checkout_formula_untouched
-case_run "the script refuses to run from inside the tap clone it refreshes" 1 \
-  "IS the rvben/rumdl tap clone" validate-formula.sh < "$FORMULA"
+case_run "an uncommitted formula in a checkout that IS the tap clone is refused" 1 \
+  "run from a checkout that is not" validate-formula.sh < "$FORMULA"
 
 # A hook the clone brought with it. The refresh is allowed to move this clone; it is not
 # allowed to run its code. `reset --hard` ran no hooks, so this case exists because the
