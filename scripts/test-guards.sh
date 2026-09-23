@@ -559,8 +559,33 @@ STUB
   chmod +x "$1/gh"
 }
 
+# A gh too old to know --source-ref, which is every gh before 2.68.0. Cobra
+# rejects the flag before the command runs, so nothing about the asset was ever
+# checked: reporting this as "no valid build provenance" would send a maintainer to
+# look at the release instead of at their own gh. The stub prints what a real gh
+# prints for a flag it does not have, measured on 2.101.0 with a bogus flag name.
+write_gh_stub_no_source_ref() { # <stubdir>
+  cat > "$1/gh" <<'STUB'
+#!/bin/sh
+case "$1 $2" in
+  "auth status") exit 0 ;;
+esac
+for a in "$@"; do
+  if [ "$a" = "--source-ref" ]; then
+    echo "unknown flag: --source-ref" >&2
+    echo "Usage:  gh attestation verify [<file-path> | oci://<image-uri>] [--owner | --repo] [flags]" >&2
+    exit 1
+  fi
+done
+exit 0
+STUB
+  chmod +x "$1/gh"
+}
+
 stubs_attested_first_only() { write_curl_stub "$1" "$WORK/assets"
   write_gh_stub_first_only "$1"; write_file_stub "$1"; }
+stubs_gh_without_source_ref() { write_curl_stub "$1" "$WORK/assets"
+  write_gh_stub_no_source_ref "$1"; write_file_stub "$1"; }
 stubs_attested_other_version() { write_curl_stub "$1" "$WORK/assets"
   write_gh_stub_other_version "$1" "refs/tags/v$CUR_VERSION"; write_file_stub "$1"; }
 stubs_attested_wrong_signer() { write_curl_stub "$1" "$WORK/assets"
@@ -2629,6 +2654,19 @@ CASE_STUBS=stubs_attested_other_version
 CASE_ASSERT=assert_formula_untouched
 case_run "an asset attested for another version is refused" 1 \
   "expected SourceRepositoryRef to be refs/tags/v$OTHER_VERSION" \
+  update-formula.sh "$OTHER_VERSION" < "$FORMULA"
+
+# A gh that rejects --source-ref, i.e. anything before 2.68.0. The refusal is the
+# same exit code and the same untouched formula as every other provenance refusal,
+# so what this case is for is the diagnosis: nothing was checked about the asset,
+# and saying "no valid build provenance" would point a maintainer at the release
+# instead of at their gh. Asserted on the version floor, which only that arm
+# prints, because the branch is keyed on gh's wording and no control over the flag
+# itself can reach it.
+CASE_STUBS=stubs_gh_without_source_ref
+CASE_ASSERT=assert_formula_untouched
+case_run "a gh with no --source-ref is refused, naming the version it needs" 1 \
+  "gh 2.68.0 or newer is required" \
   update-formula.sh "$OTHER_VERSION" < "$FORMULA"
 
 # The v0.2.76 case itself: the formula already names this version, and the

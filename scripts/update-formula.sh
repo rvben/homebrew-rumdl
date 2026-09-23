@@ -196,7 +196,13 @@ while IFS= read -r url; do
     # An unknown flag is a different fact from an asset that fails the check, and
     # reporting it as the latter would send someone looking at the release
     # instead of at their gh. --source-ref exists from gh 2.68.0.
-    if grep -q 'unknown flag: --source-ref' "$tmp/attestation.log"; then
+    #
+    # Matched on "unknown flag" alone rather than on the flag's name: every other
+    # flag in the command above has been there for years, so the only flag a gh
+    # old enough to reject one can be rejecting is this one, and keying the branch
+    # to the exact rendering would send a reworded message down the wrong arm,
+    # which is the misreport this branch exists to prevent.
+    if grep -qi 'unknown flag' "$tmp/attestation.log"; then
       echo "error: this gh cannot bind an attestation to a tag: no --source-ref" >&2
       echo "       $(gh --version | head -1)" >&2
       echo "       gh 2.68.0 or newer is required. Without that flag the check would" >&2
