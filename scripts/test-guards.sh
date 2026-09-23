@@ -32,6 +32,17 @@ FORMULA="Formula/rumdl.rb"
 [ -f "$FORMULA" ] || { echo "error: $FORMULA not found" >&2; exit 1; }
 
 WORK="$(mktemp -d)"
+# There is no `set -e` here, so a failed mktemp is not fatal by itself: $WORK ends
+# up empty, every case builds its scratch tree at /case-N, mkdir is denied, and
+# twelve guard failures get reported for a scratch directory that was never
+# created. Observed for real in a sandbox with no writable temporary directory,
+# which reported "FAILED: 5 of 5 guard tests" and said nothing about mktemp. The
+# other scripts here run under `set -e` and abort on their own.
+if [ -z "${WORK:-}" ] || [ ! -d "$WORK" ]; then
+  echo "error: could not create a temporary directory (mktemp -d failed)." >&2
+  echo "       Every case needs one. Refusing to report guard failures for it." >&2
+  exit 1
+fi
 trap 'rm -rf "$WORK"' EXIT
 
 # Read from the formula rather than written in here. A mutation built from a
