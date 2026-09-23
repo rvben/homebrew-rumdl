@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Before trusting the check below, check the checker. Offline and hermetic,
       # so it costs seconds: it breaks the formula one way at a time and requires
@@ -61,7 +61,7 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: The formula names rumdl's latest release
         env:
@@ -98,7 +98,7 @@ jobs:
 
     steps:
       - name: Checkout tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Pinned to a commit, not to a branch. `@master` was the reference here
       # until now, and Homebrew/actions has since renamed its default branch to

@@ -34,7 +34,7 @@ jobs:
       # dispatched - its own push would then be rejected as non-fast-forward.
       # Checking out the branch means a queued run starts from what the run
       # ahead of it just pushed.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: main
 
