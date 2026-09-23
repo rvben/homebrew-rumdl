@@ -57,6 +57,19 @@ else
 fi
 echo
 
+# Same arrangement, same reason: the gate is the pins job, which pins the version
+# and checks its hash. Invalid workflow YAML produces no run rather than a failing
+# one, so this is not a lint whose absence should pass unmentioned.
+echo "==> The workflows are valid"
+if command -v actionlint >/dev/null 2>&1; then
+  actionlint --version | head -n 1
+  actionlint
+else
+  echo "    actionlint is not installed, so the workflows were NOT checked here."
+  echo "    CI's pins job is the gate for it. Locally: brew install actionlint"
+fi
+echo
+
 # Before the check, the checker - the same order as CI's `pins` job, because this
 # script claims to run what CI runs and a guard-script regression that only CI
 # catches makes that claim false. Offline and hermetic, so it costs seconds.
@@ -107,7 +120,20 @@ if brew tap | grep -qx rvben/rumdl; then
   # experiment plausibly lives. So look before overwriting: uncommitted changes,
   # untracked files, and commits the clone has that this checkout does not.
   dirty="$(git -C "$tap_repo" status --porcelain)"
-  ahead="$(git -C "$tap_repo" rev-list --count FETCH_HEAD..HEAD 2>/dev/null || echo 0)"
+  # Not `|| echo 0`. Zero here means "the clone holds no commits your checkout
+  # lacks", and that answer is what permits the reset --hard and clean -qfd below.
+  # A rev-list that failed - a corrupt clone, an unreadable object, a FETCH_HEAD
+  # that never landed - is not the same fact, and coercing it to 0 turns "I could
+  # not tell" into "there is nothing to lose" immediately before destroying it.
+  if ! ahead="$(git -C "$tap_repo" rev-list --count FETCH_HEAD..HEAD 2>&1)"; then
+    echo "error: could not count commits in the rvben/rumdl tap clone" >&2
+    echo "       $tap_repo" >&2
+    printf '%s\n' "$ahead" | sed 's/^/         /' >&2
+    echo "       Refreshing it means reset --hard and clean -fd, and whether that" >&2
+    echo "       would destroy anything is exactly what could not be determined." >&2
+    echo "       Inspect the clone, or drop the tap (brew untap rvben/rumdl)." >&2
+    exit 1
+  fi
   if { [ -n "$dirty" ] || [ "$ahead" != "0" ]; } && [ "${DISCARD_TAP_CLONE:-0}" = "1" ]; then
     echo "    DISCARD_TAP_CLONE=1: discarding $(printf '%s' "$dirty" | grep -c . ) changed path(s) and $ahead local commit(s)"
   elif [ -n "$dirty" ] || [ "$ahead" != "0" ]; then

@@ -62,6 +62,29 @@ jobs:
           shellcheck --version | sed -n 2p
           shellcheck scripts/*.sh
 
+      # Invalid workflow YAML in this repository does not produce a failing run,
+      # it produces no run - which is indistinguishable from a watchdog with
+      # nothing to report. A malformed `freshness` job would retire the only check
+      # that notices a replaced release asset, silently. actionlint is what makes
+      # that a failure instead.
+      #
+      # Downloaded and hash-checked rather than installed from a package manager,
+      # partly to pin the version and partly because verifying a downloaded
+      # binary against a known sha256 is this repository's entire subject.
+      - name: The workflows are valid
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          tar="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$tar" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/$tar"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$tar" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tar" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" --version
+          "$RUNNER_TEMP/actionlint" -color
+
       # Before trusting the check below, check the checker. Offline and hermetic,
       # so it costs seconds: it breaks the formula one way at a time and requires
       # the guard to reject each one with the message belonging to the check under

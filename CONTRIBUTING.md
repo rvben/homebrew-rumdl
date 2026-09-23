@@ -104,7 +104,11 @@ to know:
   so it always reflects what you have now.
 - It taps `rvben/rumdl` from your local checkout, which changes your local
   Homebrew state. `brew untap rvben/rumdl` afterwards if you would rather it did
-  not.
+  not. That leaves one thing behind: Homebrew 7 refuses to load formulae from an
+  untrusted third-party tap, so the script runs `brew trust --tap rvben/rumdl`,
+  and untapping does not revoke that. `brew trust` has no revoke flag, so to undo
+  it you remove the `rvben/rumdl` entry from `~/.homebrew/trust.json` (or
+  `$XDG_CONFIG_HOME/homebrew/trust.json` when that is set) yourself.
 - If you already have the tap, it refreshes that clone from your checkout instead
   of re-tapping, because `brew tap --force` on an already-tapped name does
   nothing and brew would keep checking the old commit. `brew edit
@@ -121,9 +125,11 @@ schedule, and on explicit dispatch. The markdown is in that list because the
 `brew` job lints it: leaving it out meant a documentation-only change was the one
 change that skipped the check for it. Its jobs:
 
-- `pins`: `shellcheck` over every script, then `scripts/test-guards.sh`, then
-  every platform's pin from one runner, without Homebrew. Every check here is a
-  shell script, so a shell defect is a guard defect.
+- `pins`: `shellcheck` over every script, `actionlint` over the workflows, then
+  `scripts/test-guards.sh`, then every platform's pin from one runner, without
+  Homebrew. Every check here is a shell script, so a shell defect is a guard
+  defect; and invalid workflow YAML produces no run at all rather than a failing
+  one, which is why the workflows are linted too.
 - `brew`: `scripts/validate-formula.sh --install` on all four platforms the
   formula declares, which is the guard suite, the pins, `brew audit`, `brew
   style`, `brew audit --strict --online`, `brew install`, `brew test`, and

@@ -88,8 +88,18 @@ if [ "${ALLOW_UNATTESTED:-0}" != "1" ]; then
   fi
 fi
 
-url_count="$(grep -c '^[[:space:]]*url "' "$FORMULA")"
-sha_count="$(grep -c '^[[:space:]]*sha256 "' "$FORMULA")"
+# `|| true` because grep -c exits 1 when it counts zero, and under set -e that
+# aborts the assignment with no message at all - a formula with no url lines would
+# fail here looking like nothing happened. Zero is then rejected explicitly, since
+# a formula this script can pin has four.
+url_count="$(grep -c '^[[:space:]]*url "' "$FORMULA" || true)"
+sha_count="$(grep -c '^[[:space:]]*sha256 "' "$FORMULA" || true)"
+if [ "$url_count" = "0" ]; then
+  echo "error: $FORMULA has no url lines to rewrite." >&2
+  echo "       Nothing here can be pinned, and continuing would write a version" >&2
+  echo "       bump into a formula that fetches nothing." >&2
+  exit 1
+fi
 if [ "$url_count" != "$sha_count" ]; then
   echo "error: $FORMULA has $url_count urls but $sha_count sha256 lines" >&2
   exit 1
