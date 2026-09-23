@@ -2633,6 +2633,14 @@ case_run "macOS pairs swapped between the intel and arm branches" 1 \
 # that gives an arm64 Mac the x86_64 archive and an Intel Mac none at all.
 sed 's|^    if Hardware::CPU.intel?$|    if !Hardware::CPU.intel?|' "$FORMULA" > "$WORK/negated.rb"
 assert_mutated "$WORK/negated.rb"
+# The count check below the unparsed-condition check refuses this fixture on its
+# own: the awk stops at the condition it cannot read, so `pairs` collapses to one
+# line while the formula still carries four urls. Without this forbid, deleting
+# the unparsed check's own `exit 1` left the case passing - the message was still
+# printed by the echo above it, and the exit came from the count check. Verified
+# both ways: that deletion passes 75/75 without this line and fails only this
+# case with it.
+CASE_FORBID="they must agree"
 CASE_ASSERT=assert_refused_before_download
 case_run "a platform branch whose condition is negated" 1 \
   "decides a platform branch in a way this script does not read" \
@@ -2758,6 +2766,60 @@ CASE_FORBID="they must agree"
 case_run "a sha256 with no url above it" 1 \
   "has no url above it" \
   verify-formula.sh < "$WORK/unpaired.rb"
+
+# The count check itself, which until now no case named: it appeared in this file
+# only as a CASE_FORBID message - the backstop two other cases must not reach - so
+# nothing here bound it, and deleting its own `exit 1` passed all 75 cases. A
+# guard the suite reasons about but never exercises is one edit away from being
+# gone without a failure.
+#
+# One sha256 line removed and the urls left alone, so the counts disagree while
+# the parser sees nothing it cannot read: the url with no sha256 below it simply
+# never emits a pair, which is not the unpaired case above (that one is a sha256
+# with no url) and not an unparsable condition. 4 urls, 3 sha256 lines, 3 pairs.
+python3 - "$FORMULA" <<'PY' > "$WORK/countskew.rb"
+import sys
+lines = open(sys.argv[1]).readlines()
+seen = 0
+out = []
+for line in lines:
+    if line.strip().startswith('sha256 "'):
+        seen += 1
+        if seen == 4:
+            continue
+    out.append(line)
+assert seen >= 4, f"expected at least 4 sha256 lines, found {seen}"
+assert len(out) == len(lines) - 1
+sys.stdout.writelines(out)
+PY
+assert_mutated "$WORK/countskew.rb"
+# With three pairs the expected-platform list refuses this formula too, and it
+# exits before the download as well, so the marker alone cannot attribute the
+# refusal. Measured: deleting the count check's own `exit 1` leaves the run
+# printing this message and then the platform list's.
+CASE_FORBID="does not ship the expected set of platforms"
+CASE_ASSERT=assert_refused_before_download
+case_run "a url and a sha256 count that disagree" 1 \
+  "they must agree" \
+  verify-formula.sh < "$WORK/countskew.rb"
+
+# The branch-exactly-once check has no case of its own, and cannot have one while
+# the checks above it stand. It compares the set of branch contexts against the
+# four; to reach it, a formula must first pass the count check, the expected-target
+# list, and the per-branch target check. Those three together force the contexts to
+# be the four distinct ones: target_for_context maps each context to a different
+# target, the per-branch check requires every url to carry its own context's
+# target, and the list requires the set of targets to be exactly the expected four
+# - so four pairs whose targets are those four and whose urls each match their
+# branch can only be sitting in the four distinct branches. A duplicated branch
+# needs a fifth pair, which changes the target multiset and is refused by the list
+# first: measured, a formula with the macos:intel pair duplicated reports
+# "unexpected: x86_64-apple-darwin", not the branch-once message.
+#
+# So it is a backstop by construction, kept for the reason its own comment in
+# verify-formula.sh gives - a check that is redundant today stops being redundant
+# the moment the checks it overlaps with are edited - and the two cases that
+# forbid its message are what would notice if it started firing first.
 
 # 9-10. The pin-format check, which unlike every check above runs inside the
 # download loop - so its case cannot rest on the exit code, because a failed
