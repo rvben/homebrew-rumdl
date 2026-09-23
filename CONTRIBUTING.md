@@ -14,7 +14,12 @@ expected platform list itself rather than deriving it from the file.
 `brew audit` and `brew style` do not check either of those things. A formula can
 pass both while pinning the wrong artifact's hash, in which case `brew install`
 fails checksum verification for the affected platform and nothing upstream of
-the user notices. Check it with:
+the user notices. Measured on Homebrew 7.0.6: `Error: Formula reports different
+checksum`, exit 1, nothing installed. On an older Homebrew it is worse rather
+than better, which is the stronger reason to check the pins here: 4.6.20 treats
+the same mismatch as a warning and installs the downloaded bytes anyway, so a
+user on that version gets the wrong artifact with a message they can miss.
+Check it with:
 
 ```bash
 ./scripts/verify-formula.sh
@@ -131,7 +136,10 @@ to know:
   untrusted third-party tap, so the script runs `brew trust --tap rvben/rumdl`,
   and untapping does not revoke that. `brew trust` has no revoke flag, so to undo
   it you remove the `rvben/rumdl` entry from `~/.homebrew/trust.json` (or
-  `$XDG_CONFIG_HOME/homebrew/trust.json` when that is set) yourself.
+  `$XDG_CONFIG_HOME/homebrew/trust.json` when that is set) yourself. It is the
+  `trustedtaps` entry you want: installing a formula by its full name records a
+  separate `trustedformulae` entry, and that one does go away again when you
+  uninstall the formula. Both measured on 7.0.6.
 - If you already have the tap, it refreshes that clone from your checkout instead
   of re-tapping, because `brew tap --force` on an already-tapped name does
   nothing and brew would keep checking the old commit. `brew edit
