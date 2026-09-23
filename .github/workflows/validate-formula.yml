@@ -13,7 +13,22 @@ on:
       - 'Formula/**'
       - 'scripts/**'
       - '.github/workflows/validate-formula.yml'
+  # The tap can break with no commit to this repository at all: a release
+  # dispatch that never arrives leaves it a version behind, and GitHub release
+  # assets can be replaced after publication, which makes an already-correct pin
+  # wrong. v0.2.76 did exactly that - two successful Release runs on one tag
+  # published two different macOS binaries - and for the window in between,
+  # every `brew install` failed checksum verification with nothing watching.
+  # A daily run is the only check that notices any of it.
+  schedule:
+    - cron: '17 6 * * *'
   workflow_dispatch:
+
+# Declared rather than inherited. Nothing here needs write access, and the repo
+# default being read-only is a setting that can change without anyone revisiting
+# this file.
+permissions:
+  contents: read
 
 jobs:
   # Checks every platform's pin from one runner, without Homebrew. The brew job
@@ -27,6 +42,33 @@ jobs:
 
       - name: Every sha256 is the hash of the artifact its url fetches
         run: scripts/verify-formula.sh
+
+  # Is the formula still pointing at rumdl's newest release? Nothing else asks.
+  # The update is triggered by a dispatch from rumdl's release workflow, whose
+  # notify step is `continue-on-error: true`, so a lost dispatch leaves this tap
+  # silently behind with both repositories green.
+  freshness:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout tap
+        uses: actions/checkout@v4
+
+      - name: The formula names rumdl's latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          formula="$(sed -n 's|.*/releases/download/v\([0-9][0-9.]*\)/.*|\1|p' Formula/rumdl.rb | sort -u)"
+          latest="$(gh release view --repo rvben/rumdl --json tagName --jq '.tagName' | sed 's/^v//')"
+          echo "formula: $formula"
+          echo "latest released: $latest"
+          if [ "$formula" != "$latest" ]; then
+            echo "::error::the tap is pinned to $formula but rumdl's latest release is $latest"
+            echo "Run the Update Formula workflow, or scripts/update-formula.sh $latest locally."
+            exit 1
+          fi
+          echo "The tap is up to date."
 
   # Runs the same script a contributor runs locally, rather than a second copy
   # of the same brew commands written in YAML. The two drifting apart is how the
@@ -42,8 +84,13 @@ jobs:
       - name: Checkout tap
         uses: actions/checkout@v4
 
+      # Pinned to a commit, not to a branch. `@master` was the reference here
+      # until now, and Homebrew/actions has since renamed its default branch to
+      # `main`, so that reference survived only on GitHub's rename redirect - in
+      # a workflow that had never once executed to reveal it. A branch reference
+      # also means this job runs whatever that branch holds on the day.
       - name: Setup Homebrew
-        uses: Homebrew/actions/setup-homebrew@master
+        uses: Homebrew/actions/setup-homebrew@848c272c7bfe984a197bd4d16383f4c106ec61e6 # 2026.09.21.1
 
       - name: Pins, audit, style, strict audit, install, test
         run: scripts/validate-formula.sh --install
