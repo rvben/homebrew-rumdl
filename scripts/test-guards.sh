@@ -1523,6 +1523,115 @@ STUB
   chmod +x "$1/brew"
 }
 
+# Everything below validate-formula.sh's `--install` gate. Every case above runs the
+# script with no arguments, so it exits 0 at the gate and the install half - the tap
+# collision refusals, the install-versus-reinstall choice, the keg resolution and the
+# two smoke bounds - was reached by nothing in this suite, and CI reaches only the
+# fresh-runner arm of it. Four separate mutations of that half left all 65 cases
+# passing.
+#
+# The routes brew needs for it, on top of the ones above. Each answer comes from a
+# file beside the stub so a case can set it without the stub text differing:
+#
+#   brew.cellar        what `brew --cellar rumdl` prints. EMPTY means it resolved
+#                      nothing, which is the failure the fallback exists for - not
+#                      "nothing installed". For that, name a directory that is absent.
+#   brew.prefixcellar  what the bare `brew --cellar` prints. Empty for the case where
+#                      neither resolves and the run has to refuse.
+#   brew.kegprefix     what `brew --prefix rvben/rumdl/rumdl` prints. Empty is an
+#                      install that reported success and left nothing resolvable.
+#
+# No `--prefix` or `--cellar` call exists above the gate, so adding these cannot change
+# what any existing case sees.
+write_brew_stub_install() { # write_brew_stub_install <stubdir> <clonepath>
+  local d="${1%/stub}"
+  write_brew_stub "$1" "$2" || return 1
+  # Absent by default, so the default is an ordinary machine with no rumdl installed
+  # and the plain `brew install` arm.
+  printf '%s\n' "$d/cellar-rumdl" > "$1/brew.cellar" || return 1
+  printf '%s\n' "$d/cellar" > "$1/brew.prefixcellar" || return 1
+  printf '%s\n' "$d/keg" > "$1/brew.kegprefix" || return 1
+  fixture_keg "$d" || return 1
+  cat > "$1/brew" <<'STUB'
+#!/bin/sh
+d="$(dirname "$0")"
+printf '%s\n' "$*" >> "$d/brew.calls"
+case "$1" in
+  tap)          echo rvben/rumdl ;;
+  --repository) cat "$d/brew.repository" ;;
+  livecheck)    cat "$d/brew.livecheck" ;;
+  commands)     ;;
+  # With a formula name it is rumdl's own cellar; bare it is the prefix's, which the
+  # script appends rumdl to itself. Two different answers from one flag, which is why
+  # the script reads them into different variables.
+  --cellar)     if [ -n "${2:-}" ]; then cat "$d/brew.cellar"; else cat "$d/brew.prefixcellar"; fi ;;
+  --prefix)     cat "$d/brew.kegprefix" ;;
+  *)            ;;
+esac
+exit 0
+STUB
+  chmod +x "$1/brew"
+}
+
+# The binary an install would have left behind. It is what the two smoke calls and the
+# docs lint run, so its exit code and its output are what those bounds read, and each is
+# set from a file rather than baked in: the bounds are separate checks and a case has to
+# be able to break exactly one of them.
+fixture_keg() { # fixture_keg <casedir>
+  mkdir -p "$1/keg/bin" || return 1
+  printf '1\n' > "$1/keg/bin/rumdl.badcode" || return 1
+  printf 'bad.md:2 MD022 Headings should be surrounded by blank lines\n' \
+    > "$1/keg/bin/rumdl.badtext" || return 1
+  printf '0\n' > "$1/keg/bin/rumdl.goodcode" || return 1
+  printf 'Success: no issues found\n' > "$1/keg/bin/rumdl.goodtext" || return 1
+  cat > "$1/keg/bin/rumdl" <<'BIN'
+#!/bin/sh
+b="$(dirname "$0")"
+printf '%s\n' "$*" >> "$b/rumdl.calls"
+case "$1" in
+  --version) echo "rumdl 0.2.77"; exit 0 ;;
+esac
+# `check --no-config <file>`. The file decides the answer, so the last argument is what
+# this reads: the two smoke calls pass one file each, and the docs lint passes two names
+# this fixture has no opinion about.
+last=""
+for a in "$@"; do last="$a"; done
+case "${last##*/}" in
+  bad.md)  cat "$b/rumdl.badtext";  exit "$(cat "$b/rumdl.badcode")" ;;
+  good.md) cat "$b/rumdl.goodtext"; exit "$(cat "$b/rumdl.goodcode")" ;;
+  *)       exit 0 ;;
+esac
+BIN
+  chmod +x "$1/keg/bin/rumdl"
+}
+
+# An install receipt, which is the only place the tap a keg came from is recorded. With
+# no tap argument the receipt has no "tap" key at all, which is the shape the script
+# refuses rather than guesses about.
+fixture_receipt() { # fixture_receipt <cellardir> <version> [tap]
+  mkdir -p "$1/$2" || return 1
+  if [ -n "${3:-}" ]; then
+    cat > "$1/$2/INSTALL_RECEIPT.json" <<JSON
+{
+  "homebrew_version": "7.0.6",
+  "source": {
+    "tap": "$3",
+    "spec": "stable"
+  }
+}
+JSON
+  else
+    cat > "$1/$2/INSTALL_RECEIPT.json" <<'JSON'
+{
+  "homebrew_version": "7.0.6",
+  "source": {
+    "spec": "stable"
+  }
+}
+JSON
+  fi
+}
+
 # The other half of validate-formula.sh's if/else: the tap is NOT present, so the run
 # takes `brew tap --force rvben/rumdl <path>` and everything after it depends on a clone
 # this script never made. Every case above stubs `brew tap` as always tapped, so that
@@ -3345,6 +3454,196 @@ CASE_SETUP=setup_clone_clean
 CASE_STUBS=stubs_validator_livecheck_unresolved
 case_run "a livecheck block that resolves nothing is refused" 1 \
   "livecheck block resolved no version" validate-formula.sh < "$FORMULA"
+
+# --------------------------------------------------------------------------------
+# The install half, which every case above skips by not passing --install.
+#
+# All of these start from the clean-clone happy path, so the run reaches the gate the
+# same way `case_run "a clean tap clone is moved to the checkout's HEAD"` does, and the
+# only thing under test is what happens below it.
+
+setup_install_nothing() { setup_clone_clean "$1"; }
+# rumdl is a homebrew-core formula too, so this is the ordinary state of a machine that
+# installed it the obvious way - including this one, which holds core's 0.2.76.
+setup_install_core_keg() {
+  setup_clone_clean "$1" || return 1
+  fixture_receipt "$1/cellar-rumdl" 0.2.76 homebrew/core
+}
+setup_install_our_keg() {
+  setup_clone_clean "$1" || return 1
+  fixture_receipt "$1/cellar-rumdl" "$CUR_VERSION" rvben/rumdl
+}
+# A receipt with no "tap" key. Homebrew writes one, so this is a truncated or
+# hand-edited file - the case for refusing rather than reading the absence as a tap.
+setup_install_receipt_without_tap() {
+  setup_clone_clean "$1" || return 1
+  fixture_receipt "$1/cellar-rumdl" 0.2.76
+}
+# The keg reachable only through the prefix fallback: nothing at the cellar path brew
+# failed to report, our keg under the prefix it could report.
+setup_install_our_keg_under_prefix() {
+  setup_clone_clean "$1" || return 1
+  fixture_receipt "$1/cellar/rumdl" "$CUR_VERSION" rvben/rumdl
+}
+
+stubs_validator_install() {
+  write_validator_stubs "$1"
+  write_brew_stub_install "$1" "${1%/stub}/tap-clone"
+}
+# `brew --cellar rumdl` resolving nothing. Empty rather than absent: the script's comment
+# is explicit that brew exits 0 and prints the path even when nothing is installed, so an
+# empty answer means the resolution failed and must not be read as "nothing installed".
+stubs_validator_install_cellar_unresolved() {
+  stubs_validator_install "$1" || return 1
+  : > "$1/brew.cellar"
+}
+stubs_validator_install_no_cellar_at_all() {
+  stubs_validator_install "$1" || return 1
+  : > "$1/brew.cellar"
+  : > "$1/brew.prefixcellar"
+}
+stubs_validator_install_keg_unresolvable() {
+  stubs_validator_install "$1" || return 1
+  : > "$1/brew.kegprefix"
+}
+# The binary reporting a clean file where the fixture is dirty, while still naming the
+# rule. Only the exit-code bound of smoke() can catch this.
+stubs_validator_install_binary_exits_clean() {
+  stubs_validator_install "$1" || return 1
+  printf '0\n' > "${1%/stub}/keg/bin/rumdl.badcode"
+}
+# And the mirror: the right exit code with output that never names the rule, which only
+# the substring bound can catch. A binary that exits 1 for any reason at all - a config
+# error, a crash - looks like a working linter to a check that reads the code alone.
+stubs_validator_install_binary_silent() {
+  stubs_validator_install "$1" || return 1
+  printf 'error: could not read configuration\n' > "${1%/stub}/keg/bin/rumdl.badtext"
+}
+
+brew_calls_or_fail() { # brew_calls_or_fail <casedir>
+  if [ ! -f "$1/stub/brew.calls" ]; then
+    echo "no brew call was logged at all, so this case proves nothing about which"
+    echo "install verb ran - the stub did not run, or its log moved."
+    return 1
+  fi
+}
+assert_brew_reinstalled() { # <casedir>
+  brew_calls_or_fail "$1" || return 1
+  if ! grep -qx 'reinstall --verbose rvben/rumdl/rumdl' "$1/stub/brew.calls"; then
+    echo "brew reinstall was never called, so a keg this tap already installed was not"
+    echo "replaced and the tests below ran against the binary already on disk:"
+    sed 's/^/  /' "$1/stub/brew.calls"
+    return 1
+  fi
+  if grep -q '^install --verbose' "$1/stub/brew.calls"; then
+    echo "brew install was called on an already-installed keg, which exits 0 without"
+    echo "doing anything:"
+    sed 's/^/  /' "$1/stub/brew.calls"
+    return 1
+  fi
+}
+assert_brew_installed_plainly() { # <casedir>
+  brew_calls_or_fail "$1" || return 1
+  if ! grep -qx 'install --verbose rvben/rumdl/rumdl' "$1/stub/brew.calls"; then
+    echo "brew install was never called, so nothing was installed to test:"
+    sed 's/^/  /' "$1/stub/brew.calls"
+    return 1
+  fi
+  if grep -q '^reinstall' "$1/stub/brew.calls"; then
+    echo "brew reinstall was called with nothing installed:"
+    sed 's/^/  /' "$1/stub/brew.calls"
+    return 1
+  fi
+}
+assert_nothing_was_installed() { # <casedir>
+  brew_calls_or_fail "$1" || return 1
+  if grep -qE '^(install|reinstall|test)' "$1/stub/brew.calls"; then
+    echo "the run refused and then installed anyway, so the refusal did not stop it:"
+    sed 's/^/  /' "$1/stub/brew.calls"
+    return 1
+  fi
+}
+# The mirror of the above, for the refusal that comes AFTER a successful install: it has
+# to be reached, or the case would pass on a run that never got that far.
+assert_installed_before_refusing() { # <casedir>
+  brew_calls_or_fail "$1" || return 1
+  if ! grep -q '^install --verbose' "$1/stub/brew.calls"; then
+    echo "the run never reached the install, so this case does not exercise the refusal"
+    echo "that follows one:"
+    sed 's/^/  /' "$1/stub/brew.calls"
+    return 1
+  fi
+}
+
+# Nothing installed: the plain arm, and the negative control for the case below it.
+CASE_SETUP=setup_install_nothing
+CASE_STUBS=stubs_validator_install
+CASE_ASSERT=assert_brew_installed_plainly
+case_run "with nothing installed the install arm is the plain one" 0 \
+  "==> brew install" validate-formula.sh --install < "$FORMULA"
+
+# A keg this tap installed. `brew install` would exit 0 having done nothing, and every
+# check below it would then report on the binary that was already there - a green run
+# that validated none of the change being made.
+CASE_SETUP=setup_install_our_keg
+CASE_STUBS=stubs_validator_install
+CASE_ASSERT=assert_brew_reinstalled
+case_run "a keg from this tap is reinstalled, not installed over" 0 \
+  "a keg from this tap is already installed" validate-formula.sh --install < "$FORMULA"
+
+# core's copy installed. brew refuses to put this tap's beside it, and its own error is
+# easy to read as a problem with the formula.
+CASE_SETUP=setup_install_core_keg
+CASE_STUBS=stubs_validator_install
+CASE_ASSERT=assert_nothing_was_installed
+case_run "a keg from another tap is reported as a collision, not a bad formula" 1 \
+  "already installed from the homebrew/core tap" validate-formula.sh --install < "$FORMULA"
+
+# A receipt that records no tap. Guessing either skips a real collision or blocks a good
+# run, so the only right answer is to say the question cannot be answered.
+CASE_SETUP=setup_install_receipt_without_tap
+CASE_STUBS=stubs_validator_install
+CASE_ASSERT=assert_nothing_was_installed
+case_run "a receipt recording no tap is refused rather than guessed at" 1 \
+  "records no source tap" validate-formula.sh --install < "$FORMULA"
+
+# The cellar path unresolvable, the prefix answering. The fallback has to find the keg
+# the first call could not point at, so this also proves the fallback path is read for
+# receipts rather than merely printed.
+CASE_SETUP=setup_install_our_keg_under_prefix
+CASE_STUBS=stubs_validator_install_cellar_unresolved
+CASE_ASSERT=assert_brew_reinstalled
+case_run "a cellar brew cannot resolve falls back to the path under the prefix" 0 \
+  "could not resolve rumdl's cellar" validate-formula.sh --install < "$FORMULA"
+
+# Neither answering. Continuing would decide "nothing is installed" from a call that
+# failed, which is the wrong answer dressed as a pass.
+CASE_SETUP=setup_install_nothing
+CASE_STUBS=stubs_validator_install_no_cellar_at_all
+CASE_ASSERT=assert_nothing_was_installed
+case_run "a brew that cannot report any Cellar path stops the run" 1 \
+  "brew cannot report its Cellar path" validate-formula.sh --install < "$FORMULA"
+
+# An install that reported success and left nothing resolvable. The refusal matters
+# because the alternative - testing \$(brew --prefix)/bin/rumdl - could only ever run in
+# the one situation where that binary's provenance is unknown.
+CASE_SETUP=setup_install_nothing
+CASE_STUBS=stubs_validator_install_keg_unresolvable
+CASE_ASSERT=assert_installed_before_refusing
+case_run "an install that leaves no resolvable keg is not tested through the prefix" 1 \
+  "has no prefix" validate-formula.sh --install < "$FORMULA"
+
+# The two smoke bounds, one case each, because one check that reads both is satisfied by
+# either and a single case cannot tell which bound is doing the work.
+CASE_SETUP=setup_install_nothing
+CASE_STUBS=stubs_validator_install_binary_exits_clean
+case_run "a binary that calls a violating file clean fails the exit-code bound" 1 \
+  "exited 0 (want 1)" validate-formula.sh --install < "$FORMULA"
+
+CASE_SETUP=setup_install_nothing
+CASE_STUBS=stubs_validator_install_binary_silent
+case_run "a binary that exits 1 without naming the rule fails the output bound" 1 \
+  "did not contain \"MD022\"" validate-formula.sh --install < "$FORMULA"
 
 echo
 if [ "$fail" -ne 0 ]; then
