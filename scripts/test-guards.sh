@@ -112,9 +112,17 @@ export PATH="$WORK/stub:$PATH"
 # those point at, and the case reports a guard failure for it. Reproduced: with
 # GIT_DIR set to an unrelated repository, its .git/config was rewritten and the
 # setup then failed on `pathspec 'Formula' did not match any files`.
+#
+# GIT_TEMPLATE_DIR is in the list for a different reason: the scratch repository
+# below already pins `init.templateDir=`, and the environment variable overrides
+# that config rather than being overridden by it. A template carrying an
+# `info/exclude` that names Formula, scripts or original.rb then makes `git add`
+# refuse the fixture files it just wrote, and the suite stops at the first
+# tap-clone case with a harness failure.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
       GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE \
-      GIT_CONFIG GIT_CONFIG_COUNT
+      GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM \
+      GIT_TEMPLATE_DIR
 #
 # The scripts under test read their escape hatches from the environment, and each
 # one turns a refusal that a case asserts into a deliberate proceed. A case must
@@ -355,8 +363,12 @@ mkdir -p "$WORK/nohooks"
 # Pinned config rather than the machine's: a global commit.gpgsign, a templateDir
 # that copies hooks, or a missing user.name each turn a scratch commit into a
 # harness failure that reads as a guard failure.
+# core.excludesFile is pinned away for the same class of reason as the template:
+# whether a fixture file can be committed must not depend on what the machine's
+# global ignore file happens to name.
 scratch_git() {
-  git -c init.templateDir= -c core.hooksPath="$WORK/nohooks" -c commit.gpgsign=false \
+  git -c init.templateDir= -c core.excludesFile=/dev/null \
+      -c core.hooksPath="$WORK/nohooks" -c commit.gpgsign=false \
       -c user.name=guard -c user.email=guard@example.invalid "$@"
 }
 
@@ -368,7 +380,9 @@ setup_tap_clone() { # setup_tap_clone <casedir>
   printf '#!/bin/sh\nexit 0\n' > "$d/scripts/verify-formula.sh"
   chmod +x "$d/scripts/test-guards.sh" "$d/scripts/verify-formula.sh"
   scratch_git init -q "$d" || return 1
-  scratch_git -C "$d" add Formula scripts original.rb || return 1
+  # -f on paths this function wrote itself, so no ignore rule from any source can
+  # decide whether the fixture repository gets built.
+  scratch_git -C "$d" add -f Formula scripts original.rb || return 1
   scratch_git -C "$d" commit -q -m "the tap at its first commit" || return 1
   scratch_git clone -q "$d" "$d/tap-clone" || return 1
   # The checkout moves on by one commit, so the refresh has something to do and
