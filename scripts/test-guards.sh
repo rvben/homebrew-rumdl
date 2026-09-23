@@ -244,6 +244,20 @@ assert_one_failure_in_the_loop() { # <casedir>
   fi
 }
 
+# For the three ghs that cannot run the provenance command. The version floor alone
+# is not enough: a run that printed the floor AND went on to blame the release has
+# still misreported, and the point of the branch is that the maintainer is not sent
+# to look at the release.
+assert_not_blamed_on_the_release() { # <casedir>
+  assert_formula_untouched "$1" || return 1
+  if grep -qF 'has no valid build provenance' "$1/out.txt"; then
+    echo "the run also printed the release-blaming message, so it did not tell the"
+    echo "maintainer their gh is the problem - it told them both things:"
+    sed 's/^/  /' "$1/out.txt" | tail -12
+    return 1
+  fi
+}
+
 assert_advises_repin() { # <casedir>
   assert_one_failure_in_the_loop "$1" || return 1
   if ! grep -qF 'Run scripts/update-formula.sh' "$1/out.txt"; then
@@ -635,17 +649,24 @@ STUB
 # A gh too old to know --source-ref, which is every gh before 2.68.0. Cobra
 # rejects the flag before the command runs, so nothing about the asset was ever
 # checked: reporting this as "no valid build provenance" would send a maintainer to
-# look at the release instead of at their own gh. The stub prints what a real gh
-# prints for a flag it does not have, measured on 2.101.0 with a bogus flag name.
-write_gh_stub_no_source_ref() { # <stubdir>
+# look at the release instead of at their own gh.
+#
+# The complaint is an argument because the updater must not depend on one
+# rendering of it. The default is what a real gh prints, measured on 2.101.0 with a
+# bogus flag name; a case passes the quoted form as well, and a match keyed to
+# either exact string fails on the other one. That is the whole of what widening
+# the updater's match bought, and one stub cannot show it.
+write_gh_stub_no_source_ref() { # <stubdir> [rendering]
+  printf '%s\n' "${2:-unknown flag: --source-ref}" > "$1/gh.flag-complaint"
   cat > "$1/gh" <<'STUB'
 #!/bin/sh
 case "$1 $2" in
   "auth status") exit 0 ;;
 esac
+here="$(dirname "$0")"
 for a in "$@"; do
   if [ "$a" = "--source-ref" ]; then
-    echo "unknown flag: --source-ref" >&2
+    cat "$here/gh.flag-complaint" >&2
     echo "Usage:  gh attestation verify [<file-path> | oci://<image-uri>] [--owner | --repo] [flags]" >&2
     exit 1
   fi
@@ -655,10 +676,39 @@ STUB
   chmod +x "$1/gh"
 }
 
+# A gh with no `attestation` command set at all, which is every gh before 2.49.0.
+# Its complaint is about the command, not a flag, so a match on "unknown flag"
+# alone routes the oldest gh of all to the message that blames the release. The
+# wording is cobra's, measured on the gh here by asking it for a command it does
+# not have; `gh auth status` still succeeds, which is why the pre-flight check does
+# not catch this.
+write_gh_stub_no_attestation() { # <stubdir>
+  cat > "$1/gh" <<'STUB'
+#!/bin/sh
+case "$1 $2" in
+  "auth status") exit 0 ;;
+esac
+if [ "$1" = "attestation" ]; then
+  echo 'unknown command "attestation" for "gh"' >&2
+  echo "Usage:  gh <command> <subcommand> [flags]" >&2
+  exit 1
+fi
+exit 0
+STUB
+  chmod +x "$1/gh"
+}
+
 stubs_attested_first_only() { write_curl_stub "$1" "$WORK/assets"
   write_gh_stub_first_only "$1"; write_file_stub "$1"; }
 stubs_gh_without_source_ref() { write_curl_stub "$1" "$WORK/assets"
   write_gh_stub_no_source_ref "$1"; write_file_stub "$1"; }
+# The same gh, complaining in cobra's other rendering: quoted flag name, and the
+# command it was given. Only this one fails a match keyed to the bare colon form.
+stubs_gh_without_source_ref_quoted() { write_curl_stub "$1" "$WORK/assets"
+  write_gh_stub_no_source_ref "$1" 'Error: unknown flag "--source-ref" for "gh attestation verify"'
+  write_file_stub "$1"; }
+stubs_gh_without_attestation() { write_curl_stub "$1" "$WORK/assets"
+  write_gh_stub_no_attestation "$1"; write_file_stub "$1"; }
 stubs_attested_other_version() { write_curl_stub "$1" "$WORK/assets"
   write_gh_stub_other_version "$1" "refs/tags/v$CUR_VERSION"; write_file_stub "$1"; }
 stubs_attested_wrong_signer() { write_curl_stub "$1" "$WORK/assets"
@@ -2786,16 +2836,36 @@ case_run "an asset attested for another version is refused" 1 \
   "expected SourceRepositoryRef to be refs/tags/v$OTHER_VERSION" \
   update-formula.sh "$OTHER_VERSION" < "$FORMULA"
 
-# A gh that rejects --source-ref, i.e. anything before 2.68.0. The refusal is the
-# same exit code and the same untouched formula as every other provenance refusal,
-# so what this case is for is the diagnosis: nothing was checked about the asset,
-# and saying "no valid build provenance" would point a maintainer at the release
-# instead of at their gh. Asserted on the version floor, which only that arm
-# prints, because the branch is keyed on gh's wording and no control over the flag
-# itself can reach it.
+# Three ghs that cannot run the provenance command. Each refusal is the same exit
+# code and the same untouched formula as every other provenance refusal, so what
+# these cases are for is the diagnosis: nothing was checked about the asset, and
+# saying "no valid build provenance" would point a maintainer at the release
+# instead of at their gh. All three assert the version floor, which only that arm
+# prints.
+#
+# They are three because one is not enough for what the branch claims. The first
+# shows the branch exists at all. The second is cobra's other rendering of the same
+# complaint, and it is the only one of the three that a match keyed to one exact
+# string fails - so it, not the first, is what binds the branch to any unknown-flag
+# complaint rather than to one spelling of it. The third is a gh with no
+# `attestation` command set at all (everything before 2.49.0), whose complaint
+# names the command instead of the flag, and which a match on "unknown flag" alone
+# sends to the release-blaming message.
 CASE_STUBS=stubs_gh_without_source_ref
-CASE_ASSERT=assert_formula_untouched
+CASE_ASSERT=assert_not_blamed_on_the_release
 case_run "a gh with no --source-ref is refused, naming the version it needs" 1 \
+  "gh 2.68.0 or newer is required" \
+  update-formula.sh "$OTHER_VERSION" < "$FORMULA"
+
+CASE_STUBS=stubs_gh_without_source_ref_quoted
+CASE_ASSERT=assert_not_blamed_on_the_release
+case_run "a gh that quotes the flag it does not know is refused the same way" 1 \
+  "gh 2.68.0 or newer is required" \
+  update-formula.sh "$OTHER_VERSION" < "$FORMULA"
+
+CASE_STUBS=stubs_gh_without_attestation
+CASE_ASSERT=assert_not_blamed_on_the_release
+case_run "a gh with no attestation command is refused, not blamed on the release" 1 \
   "gh 2.68.0 or newer is required" \
   update-formula.sh "$OTHER_VERSION" < "$FORMULA"
 

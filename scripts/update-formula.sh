@@ -193,21 +193,30 @@ while IFS= read -r url; do
       --repo rvben/rumdl \
       --signer-workflow "$SIGNER_WORKFLOW" \
       --source-ref "refs/tags/v$VERSION" > "$tmp/attestation.log" 2>&1; then
-    # An unknown flag is a different fact from an asset that fails the check, and
-    # reporting it as the latter would send someone looking at the release
-    # instead of at their gh. --source-ref exists from gh 2.68.0.
+    # A gh that cannot run this command is a different fact from an asset that
+    # fails the check, and reporting it as the latter would send someone looking
+    # at the release instead of at their gh. Two ways it cannot: before 2.49.0
+    # there is no `attestation` command set at all, and before 2.68.0 there is no
+    # --source-ref to bind an attestation to a tag. Cobra announces the first as
+    # an unknown command and the second as an unknown flag, so both renderings
+    # belong in this branch and 2.68.0 is the floor either way.
     #
-    # Matched on "unknown flag" alone rather than on the flag's name: every other
-    # flag in the command above has been there for years, so the only flag a gh
-    # old enough to reject one can be rejecting is this one, and keying the branch
-    # to the exact rendering would send a reworded message down the wrong arm,
-    # which is the misreport this branch exists to prevent.
-    if grep -qi 'unknown flag' "$tmp/attestation.log"; then
-      echo "error: this gh cannot bind an attestation to a tag: no --source-ref" >&2
+    # Matched on the kind of complaint rather than on the name it quotes: every
+    # other flag in the command above has been there for years, so the only flag
+    # a gh old enough to reject one can be rejecting is --source-ref, while
+    # keying the branch to one exact rendering sends a reworded message down the
+    # wrong arm, which is the misreport this branch exists to prevent. The log
+    # follows the message for the same reason: cobra names the first thing it did
+    # not recognise, and that is the authority on which one it was.
+    if grep -qiE 'unknown (flag|command)' "$tmp/attestation.log"; then
+      echo "error: this gh cannot check build provenance the way this script needs" >&2
       echo "       $(gh --version | head -1)" >&2
-      echo "       gh 2.68.0 or newer is required. Without that flag the check would" >&2
+      echo "       gh 2.68.0 or newer is required: before 2.49.0 there is no" >&2
+      echo "       attestation command at all, and before 2.68.0 no --source-ref to" >&2
+      echo "       bind an attestation to a tag. Without that binding the check would" >&2
       echo "       accept any genuine rumdl build, including another version's binary" >&2
       echo "       served under a v$VERSION url." >&2
+      sed 's/^/       /' "$tmp/attestation.log" >&2
       exit 1
     fi
     echo "error: $asset has no valid build provenance for v$VERSION from rvben/rumdl" >&2
