@@ -25,6 +25,18 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 FORMULA="Formula/rumdl.rb"
 
+# This script takes no arguments: it checks the committed formula, whatever
+# version that names. Silently ignoring one turns a plausible invocation into a
+# wrong answer dressed as a pass - `verify-formula.sh 0.2.77` reads as "check
+# 0.2.77" and would report every pin matching while having checked the version
+# already in the file.
+if [ "$#" -ne 0 ]; then
+  echo "error: verify-formula.sh takes no arguments, got: $*" >&2
+  echo "       It checks $FORMULA as committed. To check a different version," >&2
+  echo "       update the formula first (scripts/update-formula.sh <version>)." >&2
+  exit 2
+fi
+
 [ -f "$FORMULA" ] || { echo "error: $FORMULA not found" >&2; exit 1; }
 
 sha256_of() {
