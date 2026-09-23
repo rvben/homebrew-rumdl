@@ -203,13 +203,26 @@ if brew tap | grep -qx rvben/rumdl; then
   # all three, so the inventory asks for the listing it needs instead of accepting
   # the one configuration chose.
   dirty="$(git -C "$tap_repo" status --porcelain --untracked-files=normal)"
-  # assume-unchanged and skip-worktree tell git not to stat a tracked file at all,
-  # so an edit to it is reported by neither `status` nor `diff --quiet HEAD`, and
-  # `reset --hard` overwrites it. No flag turns that off: whether those files hold
-  # edits is genuinely unknown here, and unknown is not the same fact as clean
-  # immediately before a destructive command, so they count as work. Verified: with
-  # rumdl.rb assume-unchanged and rewritten, status prints nothing and `git diff
-  # --quiet HEAD` exits 0, while `ls-files -v` tags it `h`.
+  # assume-unchanged and skip-worktree tell git not to stat a tracked file at all, so
+  # an edit to it is reported by neither `status` nor `diff --quiet HEAD`. No flag
+  # turns that off: whether those files hold edits is genuinely unknown here, and
+  # unknown is not the same fact as clean immediately before a destructive command,
+  # so they count as work. Verified: with rumdl.rb assume-unchanged and rewritten,
+  # status prints nothing and `git diff --quiet HEAD` exits 0, while `ls-files -v`
+  # tags it `h`.
+  #
+  # All three outcomes of refreshing anyway are bad, and which one arrives depends on
+  # the flag and on whether the fetched tree changes that path. Measured, per flag:
+  #
+  #   assume-unchanged, path unchanged by the fetch: reset --hard exits 0 and rewrites
+  #     the file from the index. The edit is gone, silently.
+  #   assume-unchanged or skip-worktree, path changed by the fetch: reset --hard exits
+  #     128 with "Entry '...' not uptodate. Cannot merge." and the run dies there, on
+  #     a git error that explains nothing about what to do.
+  #   skip-worktree, path unchanged by the fetch: reset --hard exits 0 and honours the
+  #     flag, so the local bytes stay. Nothing is lost - but if that path is the
+  #     formula, every brew check below then audits and installs the contributor's
+  #     local copy while reporting on the formula under validation.
   if ! index_flags="$(git -C "$tap_repo" ls-files -v 2>&1)"; then
     echo "error: could not read the index of the rvben/rumdl tap clone" >&2
     echo "       $tap_repo" >&2
@@ -222,6 +235,42 @@ if brew tap | grep -qx rvben/rumdl; then
   # "nothing is hidden" stays an exit status of 0 under set -e.
   hidden="$(printf '%s\n' "$index_flags" |
     awk '$1 ~ /^([a-z]|S)$/ { $1 = ""; sub(/^ /, ""); print }')"
+  # Ignored files are deliberately absent from both lists above, and `clean -fd`
+  # without -x leaves them alone, so they are normally none of this script's business.
+  # Verified: an ignored file, and an ignored file inside an untracked directory, both
+  # survive `clean -qfd` and `reset --hard`.
+  #
+  # One shape is different: a path the FETCHED commit tracks, which this clone holds
+  # as a locally created ignored file. `reset --hard` writes the fetched tree over it
+  # without the collision check `git checkout` makes, so the local bytes are replaced
+  # and every list above stays empty - status omits ignored paths and `ls-files -v`
+  # lists only tracked ones. Verified: a `notes.md` that the fetched commit had begun
+  # tracking was overwritten with the fetched bytes while status, ls-files -v and the
+  # ahead count all read clean. So intersect the two sets, and treat a path in both as
+  # work, because that is what it is.
+  if ! ignored_here="$(git -C "$tap_repo" ls-files --others --ignored --exclude-standard 2>&1)"; then
+    echo "error: could not list the ignored files in the rvben/rumdl tap clone" >&2
+    echo "       $tap_repo" >&2
+    printf '%s\n' "$ignored_here" | sed 's/^/         /' >&2
+    echo "       Refreshing it means reset --hard and clean -fd, and whether that" >&2
+    echo "       would destroy anything is exactly what could not be determined." >&2
+    exit 1
+  fi
+  if ! fetched_paths="$(git -C "$tap_repo" ls-tree -r --name-only FETCH_HEAD 2>&1)"; then
+    echo "error: could not list the files in the commit fetched from $TAP_DIR" >&2
+    echo "       $tap_repo" >&2
+    printf '%s\n' "$fetched_paths" | sed 's/^/         /' >&2
+    echo "       Refreshing it means reset --hard and clean -fd, and whether that" >&2
+    echo "       would destroy anything is exactly what could not be determined." >&2
+    exit 1
+  fi
+  # The `sed` drops the blank line an empty variable would otherwise contribute, which
+  # both sides would then share and comm would report as a match: a refusal with no
+  # path to name, on a clone holding nothing.
+  clobbered="$(comm -12 \
+    <(printf '%s\n' "$ignored_here" | sed '/^$/d' | sort) \
+    <(printf '%s\n' "$fetched_paths" | sed '/^$/d' | sort))"
+
   # Not `|| echo 0`. Zero here means "the clone holds no commits your checkout
   # lacks", and that answer is what permits the reset --hard and clean -qfd below.
   # A rev-list that failed - a corrupt clone, an unreadable object, a FETCH_HEAD
@@ -236,16 +285,21 @@ if brew tap | grep -qx rvben/rumdl; then
     echo "       Inspect the clone, or drop the tap (brew untap rvben/rumdl)." >&2
     exit 1
   fi
-  if { [ -n "$dirty" ] || [ -n "$hidden" ] || [ "$ahead" != "0" ]; } &&
-     [ "${DISCARD_TAP_CLONE:-0}" = "1" ]; then
-    echo "    DISCARD_TAP_CLONE=1: discarding $(printf '%s' "$dirty" | grep -c . ) changed path(s), $(printf '%s' "$hidden" | grep -c . ) path(s) git was told not to look at, and $ahead local commit(s)"
-  elif [ -n "$dirty" ] || [ -n "$hidden" ] || [ "$ahead" != "0" ]; then
+  if { [ -n "$dirty" ] || [ -n "$hidden" ] || [ -n "$clobbered" ] ||
+       [ "$ahead" != "0" ]; } && [ "${DISCARD_TAP_CLONE:-0}" = "1" ]; then
+    echo "    DISCARD_TAP_CLONE=1: discarding $(printf '%s' "$dirty" | grep -c . ) changed path(s), $(printf '%s' "$hidden" | grep -c . ) path(s) git was told not to look at, $(printf '%s' "$clobbered" | grep -c . ) ignored path(s) the fetched commit tracks, and $ahead local commit(s)"
+  elif [ -n "$dirty" ] || [ -n "$hidden" ] || [ -n "$clobbered" ] ||
+       [ "$ahead" != "0" ]; then
     echo "error: the rvben/rumdl tap clone holds work this would destroy" >&2
     echo "       $tap_repo" >&2
     [ -n "$dirty" ] && printf '%s\n' "$dirty" | sed 's/^/         /' >&2
     if [ -n "$hidden" ]; then
       printf '%s\n' "$hidden" | sed 's/^/         marked assume-unchanged or skip-worktree: /' >&2
       echo "         git does not stat those, so whether they hold edits is unknown" >&2
+    fi
+    if [ -n "$clobbered" ]; then
+      printf '%s\n' "$clobbered" | sed 's/^/         ignored here, tracked by the fetched commit: /' >&2
+      echo "         reset --hard writes the fetched bytes over those without asking" >&2
     fi
     [ "$ahead" != "0" ] && echo "         $ahead commit(s) not in $TAP_DIR" >&2
     echo "       Refreshing it means reset --hard and clean -fd, so this stops here." >&2
