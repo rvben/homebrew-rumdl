@@ -734,6 +734,33 @@ setup_clone_clean() { setup_tap_clone "$1"; }
 # cases hand to the stub is removed again, because here the stub's `brew tap --force`
 # makes it - that is what is under test. clone-head.txt is left recorded and unused: no
 # refusal is possible on this path, since there is no clone to refuse over.
+# A checkout with no commit at all, which is the state every other fixture here
+# establishes the opposite of. The clone is built first and is a real, level clone, then
+# the checkout's HEAD is deleted: that leaves the objects alone and the ref unborn, which
+# is the same shape as a fresh `git init` and cheaper to arrange.
+#
+# The tapped topology on purpose, because it is the one that used to end on a raw
+# `fatal: couldn't find remote ref HEAD` and exit 128, and because an already-cloned tap
+# gives the assertion two more things to require: an unmoved HEAD, and no FETCH_HEAD.
+setup_no_head_checkout() {
+  setup_tap_clone "$1" || return 1
+  scratch_git -C "$1" update-ref -d HEAD || return 1
+  if scratch_git -C "$1" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+    echo "harness: the checkout still has a HEAD, so this case tests nothing" >&2
+    return 1
+  fi
+  # The formula is still there to be read, so the refusal cannot be about a missing file.
+  if [ ! -f "$1/Formula/rumdl.rb" ]; then
+    echo "harness: the checkout has no formula, which is a different refusal" >&2
+    return 1
+  fi
+  if [ -e "$1/tap-clone/.git/FETCH_HEAD" ]; then
+    echo "harness: the clone has already fetched, so this case cannot tell whether" >&2
+    echo "         the refusal happened before the fetch" >&2
+    return 1
+  fi
+}
+
 setup_clone_untapped() {
   setup_tap_clone "$1" || return 1
   rm -rf "$1/tap-clone" || return 1
@@ -1885,6 +1912,36 @@ assert_clone_rebase_still_in_progress() { # <casedir>
   return "$bad"
 }
 
+# Refused with the script's own diagnosis and before the tap is touched. The exit code
+# carries its own claim: 128 is what the unguarded fetch produced, so requiring 1 is
+# requiring that the refusal is the script's and not git's.
+assert_no_head_refused_before_the_tap() { # <casedir>
+  local bad=0
+  if [ -e "$1/tap-clone/.git/FETCH_HEAD" ]; then
+    echo "the clone has a FETCH_HEAD, so the run fetched from a checkout it had already"
+    echo "established has no HEAD, which is the fetch that fails with exit 128"
+    bad=1
+  fi
+  assert_clone_head_unmoved "$1" || bad=1
+  # Not assert_refused_before_brew_checks: that one reads the stub's log and treats a
+  # missing log as unobservable, which is right for every refusal inside the tap block,
+  # because those run after `brew --repository`. This refusal is earlier than the first
+  # brew call of any kind, so the claim is that brew was never invoked - and the stub
+  # being present and executable is what makes an empty log mean that rather than
+  # meaning the stub was never installed.
+  if [ ! -x "$1/stub/brew" ]; then
+    echo "the brew stub is not installed at $1/stub/brew, so 'brew was never invoked'"
+    echo "cannot be told apart from 'brew could not have been invoked'"
+    bad=1
+  elif [ -s "$1/stub/brew.calls" ]; then
+    echo "the run invoked brew before refusing, and this refusal is supposed to happen"
+    echo "before the tap is consulted at all:"
+    sed 's/^/  /' "$1/stub/brew.calls"
+    bad=1
+  fi
+  return "$bad"
+}
+
 # The same refusal over a stopped cherry-pick sequence, plus where it happened. The clone
 # has never fetched, so FETCH_HEAD existing at all means the run wrote into that
 # repository before deciding it would not touch it - which is the difference between
@@ -2696,6 +2753,19 @@ CASE_ENV=case_env_discard_tap_clone
 CASE_ASSERT=assert_clone_sequence_untouched
 case_run "DISCARD_TAP_CLONE=1 does not cover a cherry-pick sequence" 1 \
   "git operation in progress" validate-formula.sh < "$FORMULA"
+
+# The third FORMULA_STATE, which had no case while it had three arms further down the
+# script. Two measured outcomes made it a refusal instead: tapped, the refresh fetched
+# HEAD from a repository with no HEAD and the run ended on git's own fatal with exit 128;
+# untapped, its arm through the byte check skipped the no-formula refusal, so a tap brew
+# had cloned from a repository with no commits - and which therefore held no formula -
+# collected "Audit and style pass". The exit code asserted here is 1 for that reason: 128
+# is the failure this replaced.
+CASE_SETUP=setup_no_head_checkout
+CASE_STUBS=stubs_validator
+CASE_ASSERT=assert_no_head_refused_before_the_tap
+case_run "a checkout with no HEAD commit is refused before the tap is touched" 1 \
+  "has no HEAD commit" validate-formula.sh < "$FORMULA"
 
 # The script run from inside the tap clone, which is one directory doing both jobs. The tap
 # clone is a full clone of this repository, scripts included, so it is a reasonable thing to

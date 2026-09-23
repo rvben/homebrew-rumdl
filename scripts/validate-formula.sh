@@ -130,11 +130,12 @@ echo
 # clean `brew audit`, a passing `brew test` and a final "all checks passed" line
 # from a run that never looked at it. So the run says which tree answered, and
 # says so again at the end, where the claim is made.
-# Three states, not two. "There is no HEAD to compare against" is a different
-# fact from "the formula matches HEAD", and reading the first as the second is how
-# a checkout with no commits at all - a fresh `git init`, a clone interrupted
-# before its first fetch - collects a report saying the committed formula was
-# audited.
+# Three states, not two, and the third one ends the run. "There is no HEAD to
+# compare against" is a different fact from "the formula matches HEAD", and
+# reading the first as the second is how a checkout with no commits at all - a
+# fresh `git init`, a clone interrupted before its first fetch - collects a
+# report saying the committed formula was audited. Distinguishing them is what
+# makes it refusable; see the branch below for what each topology does with it.
 HEAD_SHA=""
 FORMULA_STATE=committed
 if ! git -C "$TAP_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
@@ -155,11 +156,26 @@ if [ "$FORMULA_STATE" = uncommitted ]; then
   echo "    brew audits, installs or tests. Commit it first to validate it."
   echo
 elif [ "$FORMULA_STATE" = unknown ]; then
-  echo "==> WARNING: $TAP_DIR has no HEAD commit"
-  echo "    Whether Formula/rumdl.rb is committed cannot be determined, so this"
-  echo "    run cannot say which bytes the brew checks below read. Commit the"
-  echo "    formula, then re-run to get an answer that names a commit."
-  echo
+  # A refusal rather than a warning, because neither tap topology survives this
+  # state and both were measured. With the tap already present, the refresh runs
+  # `fetch "$TAP_DIR" HEAD` against a repository that has no HEAD: git says
+  # `fatal: couldn't find remote ref HEAD` and the run ends on exit 128, with a
+  # raw git fatal as the whole user-facing outcome. Untapped is worse, because it
+  # looks like success: brew clones a repository with no commits, so the tap holds
+  # no formula at all, and the state's own arm through the byte check skipped the
+  # check that refuses exactly that - the run went on to print "Audit and style
+  # pass" for a tap brew could not have read a formula out of.
+  #
+  # So the state is refused where it is detected, before anything is fetched or
+  # tapped, and the arms that used to carry it further down are gone with it.
+  echo "error: $TAP_DIR has no HEAD commit" >&2
+  echo "       Every check below the pins reads a CLONE of this repository at" >&2
+  echo "       HEAD, so with no commit to clone there is nothing for them to" >&2
+  echo "       read and no bytes to compare against. The pin checks above" >&2
+  echo "       passed - those read the working tree - and they are all this" >&2
+  echo "       run can tell you." >&2
+  echo "       Commit Formula/rumdl.rb, then re-run." >&2
+  exit 1
 fi
 
 # Everything below is built on the tap clone and this checkout being two directories:
@@ -606,10 +622,7 @@ fi
 # exposed to: brew's clone gets the contributor's core.autocrlf, nothing here can pass a
 # flag to it, and "re-tap to get a clean clone" would loop forever. So the diagnosis
 # names that too, and says which of the three causes re-tapping actually fixes.
-if [ "$FORMULA_STATE" = unknown ]; then
-  echo "==> Not checking the tap clone's bytes: $TAP_DIR has no HEAD commit, so this"
-  echo "    run has no committed formula to compare against."
-elif ! git -C "$TAP_DIR" cat-file -e HEAD:Formula/rumdl.rb 2>/dev/null; then
+if ! git -C "$TAP_DIR" cat-file -e HEAD:Formula/rumdl.rb 2>/dev/null; then
   echo "error: HEAD in $TAP_DIR has no Formula/rumdl.rb" >&2
   echo "       Every check below reads a clone of that commit, so there is nothing" >&2
   echo "       for them to validate and no bytes to compare." >&2
@@ -692,12 +705,7 @@ echo "    livecheck resolves the newest rumdl release as $livecheck_latest"
 echo
 
 if [ "$WITH_INSTALL" -eq 0 ]; then
-  if [ "$FORMULA_STATE" = unknown ]; then
-    echo "Pins pass against this working tree. Audit and style pass against a clone"
-    echo "of a repository with no HEAD, so which bytes they read is unrecorded."
-  else
-    echo "Pins pass against this working tree. Audit and style pass against $HEAD_SHA."
-  fi
+  echo "Pins pass against this working tree. Audit and style pass against $HEAD_SHA."
   # Spelled as an `if`: a bare `[ ... ] && echo` is a statement that returns 1
   # when the test is false, which under `set -e` ends the run here.
   if [ "$FORMULA_STATE" = uncommitted ]; then
@@ -854,14 +862,8 @@ echo "==> The installed binary lints this repository's own docs"
 "$RUMDL" check --no-config README.md CONTRIBUTING.md
 echo
 
-if [ "$FORMULA_STATE" = unknown ]; then
-  echo "Pins pass against this working tree. Audit, style, install and test pass"
-  echo "against a clone of a repository with no HEAD, so which bytes they read is"
-  echo "unrecorded."
-else
-  echo "Pins pass against this working tree. Audit, style, install and test pass"
-  echo "against $HEAD_SHA, which is what brew read."
-fi
+echo "Pins pass against this working tree. Audit, style, install and test pass"
+echo "against $HEAD_SHA, which is what brew read."
 if [ "$FORMULA_STATE" = uncommitted ]; then
   echo "Your uncommitted Formula/rumdl.rb was NOT installed or tested. Commit it"
   echo "and re-run: nothing below the pin check looked at it."

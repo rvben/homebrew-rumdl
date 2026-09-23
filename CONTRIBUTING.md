@@ -143,9 +143,12 @@ to know:
   the two, having rejected an `A && B || C` line that the newer one accepted
   silently. CI is the authority.
 - `brew tap --force rvben/rumdl <path>` clones the repository, so the `brew`
-  checks see `HEAD`, not your uncommitted changes. Commit first if you want brew
-  to see your edit. The pin check at the start reads the working tree directly,
-  so it always reflects what you have now.
+  checks see `HEAD`, not your uncommitted changes. Commit first if you want
+  brew to see your edit. The pin check at the start reads the working tree
+  directly, so it always reflects what you have now. With no commit at all - a
+  fresh `git init`, or a clone interrupted before its first fetch - there is
+  no `HEAD` to clone, so the run stops after the pin checks and says so rather
+  than reporting a pass for checks that had nothing to read.
 - It taps `rvben/rumdl` from your local checkout, which changes your local
   Homebrew state. `brew untap rvben/rumdl` afterwards if you would rather it did
   not. That leaves one thing behind: Homebrew 7 refuses to load formulae from an
