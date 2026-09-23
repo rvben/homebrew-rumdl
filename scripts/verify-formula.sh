@@ -6,6 +6,10 @@
 #   3. every sha256 is the hash of the artifact at the url directly above it
 #   4. every url names the same version
 #   5. every archive actually contains a rumdl binary to install
+#   6. each url sits in the platform branch its filename claims, each branch
+#      appearing exactly once
+#   7. the binary inside is built for that branch's architecture, and the Linux
+#      ones are the static musl builds the formula says they are
 #
 # Homebrew normally checks (3) only for the single platform it happens to be
 # running on, at install time, in a user's terminal, and checks none of the
@@ -42,18 +46,27 @@ CURL_OPTS=(
   --retry 3 --retry-delay 2 --retry-max-time 60
 )
 
-# Pair each url with the sha256 line that follows it. Pairing by position is
-# the point: that adjacency is exactly what Homebrew acts on, so it is what
-# has to be checked.
+# Pair each url with the sha256 line that follows it, and carry the platform
+# branch each pair sits in. Pairing by position is the point: that adjacency is
+# exactly what Homebrew acts on, so it is what has to be checked. The branch
+# comes along because the pair alone says nothing about which machine Homebrew
+# will hand it to - see the target/arch checks below.
 pairs="$(awk '
+  /^[[:space:]]*on_macos do/ { os = "macos"; cpu = ""; next }
+  /^[[:space:]]*on_linux do/ { os = "linux"; cpu = ""; next }
+  /Hardware::CPU\.intel\?/   { cpu = "intel"; next }
+  /Hardware::CPU\.arm\?/     { cpu = "arm";   next }
   /^[[:space:]]*url "/ {
-    if (match($0, /"https:[^"]*"/)) { pending = substr($0, RSTART + 1, RLENGTH - 2) }
+    if (match($0, /"https:[^"]*"/)) {
+      pending = substr($0, RSTART + 1, RLENGTH - 2)
+      pending_ctx = (os == "" || cpu == "") ? "unbound" : os ":" cpu
+    }
     next
   }
   /^[[:space:]]*sha256 "/ {
     if (pending == "") { print "UNPAIRED\tsha256 on line " NR " has no url above it"; exit }
     match($0, /"[^"]*"/)
-    print pending "\t" substr($0, RSTART + 1, RLENGTH - 2)
+    print pending "\t" substr($0, RSTART + 1, RLENGTH - 2) "\t" pending_ctx
     pending = ""
   }
 ' "$FORMULA")"
@@ -127,6 +140,83 @@ if [ "$got_targets" != "$(printf '%s\n' "$EXPECTED_TARGETS" | sort)" ]; then
   exit 1
 fi
 
+# Which machine Homebrew hands each url to is decided by the `on_macos` /
+# `on_linux` and `Hardware::CPU` branch the url sits in, and nothing above reads
+# that. Every check so far is satisfied by a formula whose four urls are the four
+# expected ones arranged in the wrong branches: the set of targets is unchanged,
+# every pin matches its own artifact, and every url names the same version.
+# Verified with a control - swapping the two macOS url/sha256 pairs between the
+# intel and arm branches gave "All 4 pins match", exit 0, on a formula that hands
+# Intel Macs an arm64-only binary. CI cannot see it either: the matrix is arm
+# macOS and x86_64 Linux, so a swap confined to the other two branches is
+# executed nowhere.
+#
+# So each branch declares the target it must carry, and the binary's own
+# architecture is checked against it further down. This is the same defect class
+# as the one this whole script exists for - a pin that belongs to a different
+# artifact - moved one step sideways into the filename.
+target_for_context() { # target_for_context <os:cpu>
+  case "$1" in
+    macos:intel) echo "x86_64-apple-darwin" ;;
+    macos:arm)   echo "aarch64-apple-darwin" ;;
+    linux:intel) echo "x86_64-unknown-linux-musl" ;;
+    linux:arm)   echo "aarch64-unknown-linux-musl" ;;
+    *)           echo "" ;;
+  esac
+}
+
+# What `file` must say about the binary inside that branch's archive. The arch
+# half catches an archive built for another machine; `statically linked` on the
+# Linux rows is the only check anywhere that the musl urls really are the static
+# musl builds the formula's own comment gives as the reason for choosing them -
+# the gnu tarball of the same version is byte-different and reports
+# "dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2", so a url quietly
+# moved to the gnu asset becomes self-consistent under every other check here.
+# Strings taken from the real v0.2.76 assets, not guessed.
+file_must_match() { # file_must_match <os:cpu>
+  case "$1" in
+    macos:intel) echo "Mach-O.*x86_64" ;;
+    macos:arm)   echo "Mach-O.*arm64" ;;
+    linux:intel) echo "ELF.*x86-64.*statically linked" ;;
+    linux:arm)   echo "ELF.*aarch64.*statically linked" ;;
+    *)           echo "" ;;
+  esac
+}
+
+bad_context=0
+while IFS="$(printf '\t')" read -r url _ ctx; do
+  asset="${url##*/}"
+  expect="$(target_for_context "$ctx")"
+  if [ -z "$expect" ]; then
+    echo "error: $asset sits in no recognised platform branch (context '$ctx')" >&2
+    echo "       Every url must be inside on_macos/on_linux and a Hardware::CPU branch." >&2
+    bad_context=1
+  else
+    case "$asset" in
+      *"-$expect.tar.gz") ;;
+      *)
+        echo "error: the $ctx branch must carry $expect, but its url is $asset" >&2
+        bad_context=1
+        ;;
+    esac
+  fi
+done <<EOF
+$pairs
+EOF
+if [ "$bad_context" -ne 0 ]; then
+  echo "error: at least one url is in the wrong platform branch" >&2
+  exit 1
+fi
+
+# And each branch exactly once, so a duplicated branch cannot stand in for a
+# missing one.
+ctx_list="$(printf '%s\n' "$pairs" | cut -f3 | sort)"
+if [ "$ctx_list" != "$(printf 'linux:arm\nlinux:intel\nmacos:arm\nmacos:intel\n')" ]; then
+  echo "error: the formula does not declare each platform branch exactly once:" >&2
+  printf '%s\n' "$ctx_list" | sed 's/^/  /' >&2
+  exit 1
+fi
+
 # The version is not declared in the formula (Homebrew scans it from the urls,
 # and declaring it too fails brew audit), so the urls have to agree among
 # themselves. A half-rewritten formula - some platforms moved to the new
@@ -163,7 +253,7 @@ echo
 
 failed=0
 n=0
-while IFS="$(printf '\t')" read -r url want; do
+while IFS="$(printf '\t')" read -r url want ctx; do
   n=$((n + 1))
   asset="${url##*/}"
 
@@ -199,7 +289,22 @@ while IFS="$(printf '\t')" read -r url want; do
        rm -rf "$tmp/x.$n" && mkdir -p "$tmp/x.$n" &&
        tar xzf "$tmp/asset.$n" -C "$tmp/x.$n" 2>/dev/null &&
        [ -f "$tmp/x.$n/rumdl" ] && [ -s "$tmp/x.$n/rumdl" ] && [ -x "$tmp/x.$n/rumdl" ]; then
-      echo "ok    $asset"
+      # The binary is here, so ask it what it is rather than trusting the
+      # filename. This is the half the filename check above cannot do: an asset
+      # built for the wrong machine, or a Linux url moved to the dynamically
+      # linked gnu build, keeps its name and its hash.
+      want_file="$(file_must_match "$ctx")"
+      got_file="$(file -b "$tmp/x.$n/rumdl" 2>/dev/null || echo "file(1) said nothing")"
+      if printf '%s' "$got_file" | grep -Eq "$want_file"; then
+        echo "ok    $asset"
+      else
+        echo "FAIL  $asset"
+        echo "      hash matches and a rumdl binary is present, but it is not the"
+        echo "      architecture the $ctx branch needs"
+        echo "      expected:   $want_file"
+        echo "      file says:  $got_file"
+        failed=1
+      fi
     else
       echo "FAIL  $asset"
       echo "      hash matches, but the archive has no installable 'rumdl' binary"
