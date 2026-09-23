@@ -66,15 +66,124 @@ fi
 # Any version that is not the current one, derived so it cannot collide with it.
 OTHER_VERSION="${CUR_VERSION%.*}.$((${CUR_VERSION##*.} + 1))"
 
-# The guard against the failure above, applied to every mutation: a sed or python
-# program that matches nothing produces the formula unchanged, and a case fed an
-# unchanged formula is testing nothing while blaming the guard for it.
+# An older version for the backwards-move case, and not just any older one. The
+# updater decides with `sort -V`, so the pair has to be one where plain `sort`
+# disagrees: with 0.1.0 against 0.2.77 both orderings give the same answer, and
+# dropping the -V left that case passing. Sorted lexicographically this version
+# must look NEWER than the current one while being genuinely older.
+OLDER_VERSION=""
+for cand in \
+  "${CUR_VERSION%.*}.$(printf '%s' "${CUR_VERSION##*.}" | cut -c1)" \
+  "${CUR_VERSION%.*}.$(( $(printf '%s' "${CUR_VERSION##*.}" | cut -c1) + 1 ))" \
+  "${CUR_VERSION%%.*}.$(printf '%s' "$CUR_VERSION" | cut -d. -f2 | cut -c1)".9
+do
+  lex="$(printf '%s\n%s\n' "$CUR_VERSION" "$cand" | sort | tail -1)"
+  ver="$(printf '%s\n%s\n' "$CUR_VERSION" "$cand" | sort -V | tail -1)"
+  if [ "$lex" = "$cand" ] && [ "$ver" = "$CUR_VERSION" ] && [ "$cand" != "$CUR_VERSION" ]; then
+    OLDER_VERSION="$cand"
+    break
+  fi
+done
+if [ -z "$OLDER_VERSION" ]; then
+  echo "HARNESS FAILURE: no older version was found that plain \`sort\` ranks above" >&2
+  echo "                 v$CUR_VERSION. The backwards-move case would then pass" >&2
+  echo "                 whether or not the updater sorts by version, which is the" >&2
+  echo "                 whole of what it tests. Add a candidate above." >&2
+  exit 1
+fi
+
+# The line verify-formula.sh prints when every structural check has passed and it
+# is about to start downloading. Written once and used by both the case that
+# requires it and the cases that require its absence, so the two cannot drift
+# apart: if this message changes, the positive control fails immediately rather
+# than the negative assertions quietly becoming vacuous.
+DOWNLOAD_MARKER="Verifying $FORMULA at version"
+
+# The structural checks in verify-formula.sh all run BEFORE the first download,
+# and every one of them exits 1. So does a run that reaches the download loop,
+# because the default stubs have no curl that succeeds - which means an exit code
+# of 1 is no evidence at all that the check under test is what stopped the run.
+# Deleting the flag assignment from a check while leaving its `echo` in place
+# satisfied both the code and the message. What separates them is the marker: a
+# structural refusal must not reach the download stage.
+# Some mutations would also be refused by a check further down, which exits 1
+# before the download stage as well - so the marker alone still cannot attribute
+# the refusal. What separates them is that a backstop announces itself: it prints
+# its own message, and a correct run never reaches it. CASE_FORBID lists the
+# messages that must therefore stay absent, one per line.
+CASE_FORBID=""
+
+assert_refused_before_download() { # <casedir>
+  if grep -qF -- "$DOWNLOAD_MARKER" "$1/out.txt"; then
+    echo "the message was printed, but the run went on to the download stage, so"
+    echo "the check did not stop it and the exit code came from a failed download:"
+    sed 's/^/  /' "$1/out.txt" | head -8
+    return 1
+  fi
+  [ -n "${CASE_FORBID:-}" ] || return 0
+  local pat
+  while IFS= read -r pat; do
+    [ -n "$pat" ] || continue
+    if grep -qF -- "$pat" "$1/out.txt"; then
+      echo "the run also printed the message of a later check:"
+      echo "  $pat"
+      echo "which refuses this formula on its own, so the case does not show that"
+      echo "the check it names is what stopped the run. A correct run never gets"
+      echo "this far."
+      return 1
+    fi
+  done <<EOF
+$CASE_FORBID
+EOF
+}
+
+# The guard against a mutation that matched nothing, which is the failure the
+# version and hash above are read from the formula to avoid: a sed or python
+# program whose pattern no longer matches produces the formula unchanged, and a
+# case fed an unchanged formula is testing nothing while blaming the guard for it.
 assert_mutated() { # assert_mutated <file>
   if cmp -s "$1" "$FORMULA"; then
     echo "HARNESS FAILURE: the mutation for the next case changed nothing." >&2
     echo "                 It would test an unmodified formula and report the" >&2
     echo "                 guard as broken. Fix the mutation, not the guard." >&2
     exit 1
+  fi
+}
+
+# The second bound for the provenance case whose stub attests the first asset and
+# not the second. Exit 1 and the refusal message are satisfied by refusing EITHER
+# asset, and a provenance check whose sense is inverted refuses the attested one -
+# so the case must also show that the attested asset was accepted. Exactly one
+# asset clears provenance before the refusal, and a run that refused asset 1
+# clears none.
+assert_first_asset_cleared_provenance() { # <casedir>
+  assert_formula_untouched "$1" || return 1
+  local oks
+  oks="$(grep -c 'provenance ok' "$1/out.txt")"
+  if [ "$oks" != 1 ]; then
+    echo "expected the attested asset to clear provenance and the next one to be"
+    echo "refused, but $oks assets cleared it - so the refusal is not evidence that"
+    echo "provenance is being read the right way round:"
+    sed 's/^/  /' "$1/out.txt" | head -12
+    return 1
+  fi
+}
+
+# The second bound for the pin-format case. The check sits inside the download
+# loop, so "exit 1" proves nothing on its own: a run that never downloaded
+# anything exits 1 too. Requiring the other three assets to have verified shows
+# the loop ran, and requiring exactly one failure shows the placeholder is what
+# stopped it.
+assert_only_the_pin_format_failed() { # <casedir>
+  local oks fails
+  oks="$(grep -c '^ok    ' "$1/out.txt")"
+  fails="$(grep -c '^FAIL  ' "$1/out.txt")"
+  if [ "$oks" != 3 ] || [ "$fails" != 1 ]; then
+    echo "expected the other three assets to verify and one to fail, got $oks ok and"
+    echo "$fails FAIL - so this case does not show that the pin's format is what"
+    echo "failed the run:"
+    sed 's/^/  /' "$1/out.txt" | head -12
+    return 1
   fi
 }
 
@@ -239,19 +348,16 @@ STUB
   chmod +x "$1/curl"
 }
 
-write_gh_stub() { # write_gh_stub <stubdir> <attestation-exit>
-  cat > "$1/gh" <<STUB
+write_gh_stub() { # write_gh_stub <stubdir>
+  cat > "$1/gh" <<'STUB'
 #!/bin/sh
-# \`gh auth status\` is checked once up front, and has to succeed here or the run
+# `gh auth status` is checked once up front, and has to succeed here or the run
 # stops on "gh is not authenticated" instead of reaching the provenance check the
 # case is about.
-case "\$1 \$2" in
+case "$1 $2" in
   "auth status") exit 0 ;;
 esac
-if [ '$2' = '0' ]; then exit 0; fi
-echo "no attestation matching the signer workflow" >&2
-echo "rvben/rumdl/.github/workflows/release.yml was expected" >&2
-exit 1
+exit 0
 STUB
   chmod +x "$1/gh"
 }
@@ -279,12 +385,63 @@ STUB
   chmod +x "$1/file"
 }
 
-stubs_attested()   { write_curl_stub "$1" "$WORK/assets";   write_gh_stub "$1" 0; write_file_stub "$1"; }
-stubs_unattested() { write_curl_stub "$1" "$WORK/assets";   write_gh_stub "$1" 1; write_file_stub "$1"; }
+stubs_attested()   { write_curl_stub "$1" "$WORK/assets";   write_gh_stub "$1"; write_file_stub "$1"; }
+
+# A gh that attests the FIRST asset and no other. The release being pinned has
+# four assets and the updater is a loop, so "provenance is checked" and "the first
+# asset's provenance is checked" are different claims that a stub refusing every
+# asset cannot separate: the loop stops on asset 1 either way. This one is refused
+# on asset 2, so an updater that checked only the first would sail past it.
+write_gh_stub_first_only() { # <stubdir>
+  cat > "$1/gh" <<'STUB'
+#!/bin/sh
+case "$1 $2" in
+  "auth status") exit 0 ;;
+esac
+here="$(dirname "$0")"
+n=$(( $(cat "$here/gh.attest.count" 2>/dev/null || echo 0) + 1 ))
+printf '%s' "$n" > "$here/gh.attest.count"
+[ "$n" = 1 ] && exit 0
+echo "no attestation matching the signer workflow" >&2
+echo "this stub attests the first asset only; asset $n is not attested" >&2
+exit 1
+STUB
+  chmod +x "$1/gh"
+}
+
+# A gh that answers as GitHub would for an asset carrying a real attestation from
+# some OTHER workflow: asked without --signer-workflow it finds one and succeeds,
+# asked with it finds none and fails. So the flag, not the presence of any
+# attestation at all, is what has to be doing the work.
+write_gh_stub_wrong_signer() { # <stubdir>
+  cat > "$1/gh" <<'STUB'
+#!/bin/sh
+case "$1 $2" in
+  "auth status") exit 0 ;;
+esac
+for a in "$@"; do
+  if [ "$a" = "--signer-workflow" ]; then
+    echo "no attestation matching the signer workflow" >&2
+    echo "an attestation exists, but it was not signed by that workflow" >&2
+    exit 1
+  fi
+done
+exit 0
+STUB
+  chmod +x "$1/gh"
+}
+
+stubs_attested_first_only() { write_curl_stub "$1" "$WORK/assets"
+  write_gh_stub_first_only "$1"; write_file_stub "$1"; }
+stubs_attested_wrong_signer() { write_curl_stub "$1" "$WORK/assets"
+  write_gh_stub_wrong_signer "$1"; write_file_stub "$1"; }
 # Four downloads to pin, then verification downloads all four again: this serves
 # the second set from the fifth call on.
 stubs_replaced_midway() { write_curl_stub "$1" "$WORK/assets" 4 "$WORK/assets-replaced"
-  write_gh_stub "$1" 0; write_file_stub "$1"; }
+  write_gh_stub "$1"; write_file_stub "$1"; }
+# For the verifier rather than the updater: downloads succeed and `file` answers,
+# and there is no gh stub because verify-formula.sh checks no attestations.
+stubs_verifier() { write_curl_stub "$1" "$WORK/assets"; write_file_stub "$1"; }
 
 assert_formula_untouched() { # <casedir>
   if ! cmp -s "$1/Formula/rumdl.rb" "$1/original.rb"; then
@@ -344,6 +501,53 @@ PAIRS
 
 assert_pinned_to_other()   { assert_pins_match_fixtures "$1" "$WORK/assets" "$OTHER_VERSION"; }
 assert_repinned_to_cur()   { assert_pins_match_fixtures "$1" "$WORK/assets" "$CUR_VERSION"; }
+
+# A copy of the formula with every pin replaced by the hash of the fixture asset
+# its own url fetches, so verify-formula.sh can be made to SUCCEED offline.
+#
+# Needed because the committed pins are the hashes of rumdl's real published
+# assets, which no local fixture can serve: every case that runs the verifier
+# against the committed formula therefore ends in a hash mismatch, and exits 1
+# whatever the check under test decided. That is invisible for the structural
+# checks, which refuse before the first download - but the pin-format check runs
+# inside the download loop, and deleting the flag it sets left its case passing on
+# a failure that came from curl.
+fixture_pinned_formula() { # fixture_pinned_formula <outfile>
+  local t
+  : > "$WORK/fixture-pins.tsv" || return 1
+  for t in $TARGETS; do
+    printf '%s\t%s\n' "$t" "$(sha256_of_file "$WORK/assets/$t.tar.gz")" >> "$WORK/fixture-pins.tsv"
+  done
+  pin_to_fixtures "$FORMULA" "$1" "$WORK/fixture-pins.tsv"
+}
+
+# The table of target -> fixture hash is passed as a FILE, not on stdin: the
+# program itself arrives on stdin, through a quoted heredoc so its own quoting
+# survives - it contains both kinds of quote, which no single-quoted `python3 -c`
+# string can carry.
+pin_to_fixtures() { # pin_to_fixtures <informula> <outfile> <tablefile>
+  python3 - "$1" "$2" "$3" <<'PY'
+import sys, re
+table = dict(l.rstrip("\n").split("\t") for l in open(sys.argv[3]) if l.strip())
+src, out = sys.argv[1], sys.argv[2]
+t = open(src).read()
+# Each url is followed by the sha256 Homebrew pairs with it, so walk the pairs in
+# order and give each pin the hash of the asset that url actually serves.
+pairs = re.findall(
+    r'"https:[^"]*/rumdl-v[0-9.]+-([a-z0-9_]+-[a-z0-9.-]+)\.tar\.gz"\s*\n\s*sha256 "([0-9a-f]{64})"',
+    t)
+if len(pairs) != len(table):
+    sys.exit(f"found {len(pairs)} url/sha256 pairs, expected {len(table)}")
+for target, old in pairs:
+    if target not in table:
+        sys.exit(f"no fixture asset for target {target}")
+    t = t.replace(f'sha256 "{old}"', f'sha256 "{table[target]}"', 1)
+missing = [h for h in table.values() if h not in t]
+if missing:
+    sys.exit("a fixture hash did not reach the formula: " + ", ".join(missing))
+open(out, "w").write(t)
+PY
+}
 
 # ---------------------------------------------------------------------------
 # The tap-clone refresh in validate-formula.sh, which is the one place in this
@@ -653,6 +857,11 @@ case_run() {
   local out code
   out="$(cd "$dir" && PATH="$dir/stub:$PATH" "./scripts/$script" "$@" 2>&1)"
   code=$?
+  # Written out so an assertion can look at what the run printed, not only at what
+  # it left on disk. What a refusal did NOT print is the evidence for several
+  # cases: the default stubs fail every download, so a structural check that
+  # stopped firing still exits 1 once the run reaches the download loop.
+  printf '%s\n' "$out" > "$dir/out.txt"
 
   local why=""
   if [ "$want_code" != "any" ] && [ "$code" != "$want_code" ]; then
@@ -673,6 +882,7 @@ case_run() {
   CASE_SETUP=""
   CASE_STUBS=""
   CASE_ASSERT=""
+  CASE_FORBID=""
 
   if [ -z "$why" ]; then
     pass=$((pass + 1))
@@ -692,7 +902,7 @@ echo
 #    check and reach the download stage, which this line marks. Without this a
 #    guard that rejected everything would pass every other case here.
 case_run "unmodified formula clears every structural check" any \
-  "Verifying Formula/rumdl.rb at version" verify-formula.sh < "$FORMULA"
+  "$DOWNLOAD_MARKER" verify-formula.sh < "$FORMULA"
 
 # 2. Arguments are rejected rather than ignored, so `verify-formula.sh 0.2.77`
 #    cannot report the committed version's pins as if they were 0.2.77's.
@@ -713,6 +923,7 @@ assert out != t and out.count("apple-darwin") == t.count("apple-darwin")
 sys.stdout.write(out)
 PY
 assert_mutated "$WORK/macswap.rb"
+CASE_ASSERT=assert_refused_before_download
 case_run "macOS pairs swapped between the intel and arm branches" 1 \
   "the macos:intel branch must carry x86_64-apple-darwin" \
   verify-formula.sh < "$WORK/macswap.rb"
@@ -722,8 +933,10 @@ case_run "macOS pairs swapped between the intel and arm branches" 1 \
 #    rejects it, and the branch-exactly-once check further down independently
 #    rejects it too - verified by neutralising the list, which left the run
 #    failing on "does not declare each platform branch exactly once". That is why
-#    this case asserts the list's own message: a mutation caught only by the
-#    backstop would otherwise read as proof of a check that is no longer there.
+#    this case asserts the list's own message - and requires the backstop's message
+#    to be absent, because asserting a message is not the same as showing that the
+#    check owning it fired: the `echo` survives deleting the flag assignment beside
+#    it, and the backstop then refuses the formula with the same exit code.
 #
 #    awk rather than `sed '/x86_64-apple-darwin/,+1d'`: the `,+N` address range is
 #    a GNU extension with no POSIX equivalent, and this suite runs on whatever sed
@@ -743,6 +956,8 @@ awk '
   }
 ' "$FORMULA" > "$WORK/dropped.rb"
 assert_mutated "$WORK/dropped.rb"
+CASE_ASSERT=assert_refused_before_download
+CASE_FORBID="does not declare each platform branch exactly once"
 case_run "a platform removed with its pin" 1 \
   "does not ship the expected set of platforms" \
   verify-formula.sh < "$WORK/dropped.rb"
@@ -751,6 +966,7 @@ case_run "a platform removed with its pin" 1 \
 #    that match the pin satisfies every hash check there is.
 sed 's|github.com/rvben/rumdl/releases|github.com/someone/else/releases|' "$FORMULA" > "$WORK/origin.rb"
 assert_mutated "$WORK/origin.rb"
+CASE_ASSERT=assert_refused_before_download
 case_run "a url that does not fetch from rumdl's releases" 1 \
   "does not fetch from rumdl's own releases" \
   verify-formula.sh < "$WORK/origin.rb"
@@ -768,14 +984,19 @@ awk -v cur="v$CUR_VERSION" -v other="v$OTHER_VERSION" '
   { print }
 ' "$FORMULA" > "$WORK/mixed.rb"
 assert_mutated "$WORK/mixed.rb"
+CASE_ASSERT=assert_refused_before_download
 case_run "urls naming two different versions" 1 \
   "name more than one version" \
   verify-formula.sh < "$WORK/mixed.rb"
 
 # 7. A url that sits in no CPU branch at all, so nothing decides which machine
-#    gets it.
+#    gets it. Removing the branch also leaves the branch counts wrong, so the
+#    backstop further down refuses this formula too - its message must stay absent
+#    for the refusal to be this check's.
 sed '/Hardware::CPU.intel?/d' "$FORMULA" > "$WORK/unbound.rb"
 assert_mutated "$WORK/unbound.rb"
+CASE_ASSERT=assert_refused_before_download
+CASE_FORBID="does not declare each platform branch exactly once"
 case_run "a url outside any Hardware::CPU branch" 1 \
   "sits in no recognised platform branch" \
   verify-formula.sh < "$WORK/unbound.rb"
@@ -795,15 +1016,44 @@ t = re.sub(r' *url "[^"]*aarch64-unknown-linux-musl\.tar\.gz"\n', '', t, count=1
 sys.stdout.write(t)
 PY
 assert_mutated "$WORK/unpaired.rb"
+CASE_ASSERT=assert_refused_before_download
 case_run "a sha256 with no url above it" 1 \
   "has no url above it" \
   verify-formula.sh < "$WORK/unpaired.rb"
 
-# 9. A pin that is not a sha256 at all. Checked before the download, so a
-#    placeholder left in the formula fails by name rather than as a hash
-#    mismatch.
-sed "s|sha256 \"$FIRST_SHA\"|sha256 \"PLACEHOLDER\"|" "$FORMULA" > "$WORK/placeholder.rb"
-assert_mutated "$WORK/placeholder.rb"
+# 9-10. The pin-format check, which unlike every check above runs inside the
+#    download loop - so its case cannot rest on the exit code, because a failed
+#    download produces the same one. Both cases here run against a formula pinned
+#    to the fixture assets, where the downloads succeed and the hashes match, so
+#    the only thing left that can fail the run is the check under test.
+fixture_pinned_formula "$WORK/fixture-pinned.rb" || {
+  echo "HARNESS FAILURE: could not build a formula pinned to the fixture assets." >&2
+  echo "                 The pin-format cases would then rest on a failed download," >&2
+  echo "                 which is what they exist to stop resting on." >&2
+  exit 1
+}
+
+# 9. The positive control for it: the verifier must be able to SUCCEED. Nothing
+#    else here shows that - the committed pins are the real published assets'
+#    hashes, which no fixture can serve, so case 1 can only require that the run
+#    reaches the download stage. Without this, a verifier that failed every
+#    formula would pass every other verifier case in this suite.
+CASE_STUBS=stubs_verifier
+case_run "a formula pinned to the bytes its urls fetch verifies clean" 0 \
+  "All 4 pins match the artifacts their urls fetch, at version $CUR_VERSION" \
+  verify-formula.sh < "$WORK/fixture-pinned.rb"
+
+# 10. And one pin replaced by a placeholder, which is what a half-finished update
+#     leaves behind. Three assets still verify, so the run is proved to have got
+#     through the loop: what fails it is the pin's format and nothing else.
+FIXTURE_FIRST_SHA="$(sed -n 's/^[[:space:]]*sha256 "\([^"]*\)".*/\1/p' "$WORK/fixture-pinned.rb" | head -1)"
+sed "s|sha256 \"$FIXTURE_FIRST_SHA\"|sha256 \"PLACEHOLDER\"|" "$WORK/fixture-pinned.rb" > "$WORK/placeholder.rb"
+if cmp -s "$WORK/placeholder.rb" "$WORK/fixture-pinned.rb"; then
+  echo "HARNESS FAILURE: the placeholder mutation changed nothing." >&2
+  exit 1
+fi
+CASE_STUBS=stubs_verifier
+CASE_ASSERT=assert_only_the_pin_format_failed
 case_run "a pin that is not 64 hex characters" 1 \
   "pinned sha256 is not 64 hex characters" \
   verify-formula.sh < "$WORK/placeholder.rb"
@@ -820,8 +1070,12 @@ case_run "a version that is not a version" 2 \
 case_run "a version whose first line only looks valid" 2 \
   "version must look like 1.2.3" update-formula.sh "$(printf '1.2.3\nrm -rf /')" < "$FORMULA"
 
+# v$OLDER_VERSION rather than an obviously old one: sorted as text it looks newer
+# than the version the formula names, so this fails if the updater compares
+# versions as strings. Which candidate is used is chosen at startup and checked
+# there for actually discriminating.
 case_run "moving the tap to an older version" 1 \
-  "Refusing to move the tap backwards" update-formula.sh 0.1.0 < "$FORMULA"
+  "Refusing to move the tap backwards" update-formula.sh "$OLDER_VERSION" < "$FORMULA"
 
 # 13-17. The updater past its structural checks, where what gets pinned is
 #    actually decided. Downloads succeed from here on, so ALLOW_UNATTESTED must go:
@@ -843,9 +1097,30 @@ case_run "a full update pins each url to the bytes that url fetched" 0 \
 #     would be perfectly self-consistent - it is the hash of what the url served -
 #     which is exactly why the attestation is checked before pinning rather than
 #     the hash being taken as sufficient.
-CASE_STUBS=stubs_unattested
-CASE_ASSERT=assert_formula_untouched
+#
+#     The first asset here IS attested and a later one is not, because the release
+#     has four assets and the check sits in a loop: a stub refusing all four cannot
+#     tell "every asset is checked" from "the first asset is checked", since the
+#     loop stops on asset 1 under either. Checking only the first left this case
+#     passing while three platforms were pinned unverified. Which asset is refused
+#     is asserted too: a check reading provenance the wrong way round refuses the
+#     attested one, with the same exit code and the same message.
+CASE_STUBS=stubs_attested_first_only
+CASE_ASSERT=assert_first_asset_cleared_provenance
 case_run "an asset with no build provenance is refused, not pinned" 1 \
+  "has no valid build provenance from rvben/rumdl" \
+  update-formula.sh "$OTHER_VERSION" < "$FORMULA"
+
+# 15. An asset that IS attested, by a workflow that is not rumdl's release
+#     workflow. Provenance alone does not say who built the bytes: anyone can
+#     attest their own build from their own workflow, so what makes the check mean
+#     "rumdl built this" is --signer-workflow. This stub answers as GitHub would
+#     for such an asset - it finds an attestation when asked without the flag and
+#     none when asked with it - so dropping the flag accepts the asset and fails
+#     this case, while every other provenance case still passes.
+CASE_STUBS=stubs_attested_wrong_signer
+CASE_ASSERT=assert_formula_untouched
+case_run "an asset attested by the wrong workflow is refused" 1 \
   "has no valid build provenance from rvben/rumdl" \
   update-formula.sh "$OTHER_VERSION" < "$FORMULA"
 
