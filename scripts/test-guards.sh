@@ -387,8 +387,15 @@ setup_tap_clone() { # setup_tap_clone <casedir>
   scratch_git clone -q "$d" "$d/tap-clone" || return 1
   # The checkout moves on by one commit, so the refresh has something to do and
   # "the clone was left alone" and "the clone was refreshed" are different states.
+  #
+  # That commit changes the FORMULA, not merely some file. What the refresh exists
+  # to achieve is that the brew checks below it read THIS Formula/rumdl.rb out of
+  # the clone's working tree; if the later commit left the formula alone, a refresh
+  # that moved the ref without touching the working tree would be indistinguishable
+  # from a correct one.
+  printf '# the checkout moved on by one commit\n' >> "$d/Formula/rumdl.rb" || return 1
   printf 'a later change in the checkout\n' > "$d/later.txt" || return 1
-  scratch_git -C "$d" add later.txt || return 1
+  scratch_git -C "$d" add -f Formula/rumdl.rb later.txt || return 1
   scratch_git -C "$d" commit -q -m "the tap moved on by one commit" || return 1
 }
 
@@ -396,7 +403,10 @@ setup_clone_clean() { setup_tap_clone "$1"; }
 
 setup_clone_dirty() {
   setup_tap_clone "$1" || return 1
-  printf '# an uncommitted edit, as brew edit would leave\n' >> "$1/tap-clone/Formula/rumdl.rb"
+  printf '# an uncommitted edit, as brew edit would leave\n' >> "$1/tap-clone/Formula/rumdl.rb" || return 1
+  # A copy of the edited file is kept, because the assertion has to require these
+  # exact bytes back rather than "the clone is dirty". See assert_clone_still_dirty.
+  cp "$1/tap-clone/Formula/rumdl.rb" "$1/clone-dirty-formula.rb" || return 1
 }
 
 # One commit the checkout does not have, and nothing uncommitted. This is the shape
@@ -478,6 +488,16 @@ assert_clone_refreshed() { # <casedir>
     echo "  clone:    $got"
     return 1
   fi
+  # And the working tree, which is what brew actually reads. A reset that moves
+  # the ref and leaves the files behind - `--soft`, or `--mixed` - matches on HEAD
+  # while brew goes on validating the previous formula, so the sha comparison
+  # above cannot be the whole assertion.
+  if ! cmp -s "$1/Formula/rumdl.rb" "$1/tap-clone/Formula/rumdl.rb"; then
+    echo "the tap clone's HEAD matches the checkout but its working-tree formula"
+    echo "does not, so the brew checks below it would read the previous formula"
+    diff "$1/Formula/rumdl.rb" "$1/tap-clone/Formula/rumdl.rb" | sed 's/^/  /'
+    return 1
+  fi
 }
 
 assert_clone_kept_its_commit() { # <casedir>
@@ -499,6 +519,18 @@ assert_clone_kept_its_commit() { # <casedir>
 assert_clone_still_dirty() { # <casedir>
   if [ -z "$(scratch_git -C "$1/tap-clone" status --porcelain)" ]; then
     echo "the clone's uncommitted changes were discarded"
+    return 1
+  fi
+  # "Dirty" is presence, and what this case protects is particular bytes. A
+  # refresh that reset the clone and then dirtied it some other way leaves it
+  # dirty while having destroyed the contributor's edit, which is the whole harm.
+  if [ ! -f "$1/clone-dirty-formula.rb" ]; then
+    echo "harness: no copy of the edited formula to compare against"
+    return 1
+  fi
+  if ! cmp -s "$1/clone-dirty-formula.rb" "$1/tap-clone/Formula/rumdl.rb"; then
+    echo "the clone is still dirty, but not with the edit that was there:"
+    diff "$1/clone-dirty-formula.rb" "$1/tap-clone/Formula/rumdl.rb" | sed 's/^/  /'
     return 1
   fi
 }
