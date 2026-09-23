@@ -279,6 +279,36 @@ echo "==> brew audit --strict --online"
 brew audit --strict --online rvben/rumdl/rumdl
 echo
 
+# The formula's livecheck block is what tells a maintainer that a new rumdl release
+# exists, and nothing else in this script or in the guard suite exercises it: the
+# suite is offline, and `brew audit` accepts a block that resolves nothing.
+#
+# What is checked is that the block RESOLVES A VERSION, not that the tap is up to
+# date - between a rumdl release and the bump that follows it, being behind is the
+# correct state and gating on it would make this script refuse the truth.
+#
+# `brew livecheck --json` exits 0 either way, which is the trap: a block whose
+# strategy matches nothing returns {"status": "error", "messages": ["Unable to get
+# versions"]} with no version object at all, and exit status 0. Verified by breaking
+# the strategy in a tapped clone. So the version has to be read out of the JSON
+# rather than inferred from the exit code, and it is the `latest` field - `current`
+# is parsed from the formula's own urls and is there even when nothing resolved.
+echo "==> The livecheck block resolves a version"
+livecheck_json="$(brew livecheck --json --formula rvben/rumdl/rumdl 2>&1 || true)"
+livecheck_latest="$(printf '%s\n' "$livecheck_json" |
+  sed -n 's/.*"latest"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+if [ -z "$livecheck_latest" ]; then
+  echo "error: the formula's livecheck block resolved no version" >&2
+  printf '%s\n' "$livecheck_json" | sed 's/^/       /' >&2
+  echo "       Either the block is wrong - a strategy that matches nothing still" >&2
+  echo "       leaves brew audit and brew style clean - or the GitHub API could not" >&2
+  echo "       be reached. The messages above say which." >&2
+  echo "       Until it resolves, nothing tells this tap a new rumdl release exists." >&2
+  exit 1
+fi
+echo "    livecheck resolves the newest rumdl release as $livecheck_latest"
+echo
+
 if [ "$WITH_INSTALL" -eq 0 ]; then
   if [ "$FORMULA_STATE" = unknown ]; then
     echo "Pins pass against this working tree. Audit and style pass against a clone"
