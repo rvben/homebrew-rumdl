@@ -22,7 +22,15 @@ usage() { echo "usage: $0 <version>   e.g. $0 0.2.76" >&2; exit 2; }
 VERSION="${1#v}"
 
 # Also the injection guard: this value reaches curl, a url and the formula text.
-if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+# bash's own =~ rather than grep, because grep matches line by line and so exits
+# 0 when ANY line matches: a value whose first line is a bare semver passed this
+# however much followed it. Verified - `printf '%s' '1.2.3\nrm -rf /'` piped to
+# the old grep exits 0, and the form below rejects it. The value arrives from
+# client_payload.version, which is JSON and can carry a literal newline, so this
+# is reachable rather than theoretical. It did fail closed further down (awk dies
+# with "newline in string" before anything is written), but failing closed by
+# accident in an obscure place is not what a guard is for.
+if ! [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "error: version must look like 1.2.3, got '$1'" >&2
   exit 2
 fi
