@@ -137,8 +137,30 @@ case_run "macOS pairs swapped between the intel and arm branches" 1 \
   verify-formula.sh < "$WORK/macswap.rb"
 
 # 4. A platform dropped entirely. The url, sha256 and pair counts all stay in
-#    agreement, so only the expected-platform list catches it.
-sed '/x86_64-apple-darwin/,+1d' "$FORMULA" > "$WORK/dropped.rb"
+#    agreement, so no count check sees it. The expected-platform list is what
+#    rejects it, and the branch-exactly-once check further down independently
+#    rejects it too - verified by neutralising the list, which left the run
+#    failing on "does not declare each platform branch exactly once". That is why
+#    this case asserts the list's own message: a mutation caught only by the
+#    backstop would otherwise read as proof of a check that is no longer there.
+#
+#    awk rather than `sed '/x86_64-apple-darwin/,+1d'`: the `,+N` address range is
+#    a GNU extension with no POSIX equivalent, and this suite runs on whatever sed
+#    the runner has. It does work on this macOS (Darwin 25.5 BSD sed deletes both
+#    lines), so nothing was broken - but a mutation that silently becomes a no-op
+#    on some other sed would feed the case an unmodified formula and blame the
+#    guard for accepting it, which is the failure assert_mutated exists to catch.
+awk '
+  /x86_64-apple-darwin/ { skip = 2 }
+  skip > 0 { skip--; dropped++; next }
+  { print }
+  END {
+    if (dropped != 2) {
+      print "mutation: expected to drop a url and its pin, dropped " dropped > "/dev/stderr"
+      exit 1
+    }
+  }
+' "$FORMULA" > "$WORK/dropped.rb"
 assert_mutated "$WORK/dropped.rb"
 case_run "a platform removed with its pin" 1 \
   "does not ship the expected set of platforms" \

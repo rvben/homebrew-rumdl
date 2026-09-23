@@ -2,7 +2,7 @@
 # Everything CI runs against the formula, runnable locally, in the same order.
 # CI runs this exact script, so the two cannot drift apart.
 #
-#   scripts/validate-formula.sh              # pins, audit, style, strict audit
+#   scripts/validate-formula.sh              # guards, pins, audit, style, strict audit
 #   scripts/validate-formula.sh --install    # also brew install + brew test
 #
 # The pin check comes first and on purpose. `brew audit` and `brew style` say
@@ -31,6 +31,15 @@ command -v brew >/dev/null 2>&1 || {
   echo "The pin check alone needs no brew: scripts/verify-formula.sh" >&2
   exit 1
 }
+
+# Before the check, the checker - the same order as CI's `pins` job, because this
+# script claims to run what CI runs and a guard-script regression that only CI
+# catches makes that claim false. Offline and hermetic, so it costs seconds.
+# Running it here also exercises the mutations under BSD sed and BSD awk, which
+# the Linux-only `pins` job never does.
+echo "==> The guards reject what they are supposed to reject"
+scripts/test-guards.sh
+echo
 
 echo "==> Every sha256 is the hash of the artifact its url fetches"
 scripts/verify-formula.sh

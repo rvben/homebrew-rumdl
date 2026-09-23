@@ -138,6 +138,13 @@ fi
 # block gave "All 3 pins match", exit 0, while macOS Intel users would have been
 # left with no bottle at all. Adding or renaming a platform is meant to require
 # an edit here; that is the check, not an inconvenience.
+#
+# That control predates the branch checks below, which now catch a dropped
+# platform as well (each branch must appear exactly once, carrying its own
+# target), so this list is no longer the only thing standing between a dropped
+# platform and a green run. It stays because it names the four targets in one
+# place and says which one went missing, and because a check that is redundant
+# today stops being redundant the moment the checks it overlaps with are edited.
 EXPECTED_TARGETS="aarch64-apple-darwin
 aarch64-unknown-linux-musl
 x86_64-apple-darwin

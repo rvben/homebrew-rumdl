@@ -79,11 +79,13 @@ passes both before and after proves nothing.
 ## Validating locally
 
 ```bash
-./scripts/validate-formula.sh            # pins, audit, style, strict audit
+./scripts/validate-formula.sh            # guards, pins, audit, style, strict audit
 ./scripts/validate-formula.sh --install  # also brew install and brew test
 ```
 
-This runs what CI runs, in the same order. Two things to know:
+This runs what CI runs, in the same order, `scripts/test-guards.sh` included, so
+a guard-script regression cannot pass locally and fail only in CI. Two things to
+know:
 
 - `brew tap --force rvben/rumdl <path>` clones the repository, so the `brew`
   checks see `HEAD`, not your uncommitted changes. Commit first if you want brew
@@ -108,10 +110,11 @@ explicit dispatch. Its jobs:
 
 - `pins`: `scripts/test-guards.sh`, then every platform's pin from one runner,
   without Homebrew.
-- `brew`: `scripts/validate-formula.sh --install` on macOS and Linux, which is
-  `brew audit`, `brew style`, `brew audit --strict --online`, `brew install` and
-  `brew test`. Each runner can only check the pin for the platform it runs on,
-  which is why the `pins` job exists.
+- `brew`: `scripts/validate-formula.sh --install` on all four platforms the
+  formula declares, which is the guard suite, the pins, `brew audit`, `brew
+  style`, `brew audit --strict --online`, `brew install` and `brew test`. Each
+  runner can only install and run the binary for the platform it is on, which is
+  why the `pins` job exists and why the matrix is four runners rather than two.
 - `freshness` (scheduled and manual runs only): is the formula still pointing at
   rumdl's newest release? Nothing else asks. The update arrives as a dispatch
   from rumdl's release workflow, whose notify step is `continue-on-error: true`,
