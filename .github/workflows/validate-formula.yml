@@ -1,10 +1,16 @@
 name: Validate Formula
 
+# The markdown is in these filters because the brew job lints it. Without it a
+# documentation-only change is exactly the change that skips the check meant to
+# catch it. It does cost a full four-platform brew matrix for a typo fix, which is
+# the price of keeping that lint next to the binary that performs it rather than
+# installing rumdl a second time in a job of its own.
 on:
   pull_request:
     paths:
       - 'Formula/**'
       - 'scripts/**'
+      - '*.md'
       - '.github/workflows/validate-formula.yml'
   push:
     branches:
@@ -12,6 +18,7 @@ on:
     paths:
       - 'Formula/**'
       - 'scripts/**'
+      - '*.md'
       - '.github/workflows/validate-formula.yml'
   # The tap can break with no commit to this repository at all: a release
   # dispatch that never arrives leaves it a version behind, and GitHub release

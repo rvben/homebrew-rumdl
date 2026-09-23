@@ -107,8 +107,10 @@ know:
 ## Continuous integration
 
 `.github/workflows/validate-formula.yml` runs on pull requests, on pushes to
-`main` that touch `Formula/**` or `scripts/**`, daily on a schedule, and on
-explicit dispatch. Its jobs:
+`main` that touch `Formula/**`, `scripts/**` or any root `*.md`, daily on a
+schedule, and on explicit dispatch. The markdown is in that list because the
+`brew` job lints it: leaving it out meant a documentation-only change was the one
+change that skipped the check for it. Its jobs:
 
 - `pins`: `shellcheck` over every script, then `scripts/test-guards.sh`, then
   every platform's pin from one runner, without Homebrew. Every check here is a
