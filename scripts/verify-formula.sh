@@ -39,6 +39,50 @@ fi
 
 [ -f "$FORMULA" ] || { echo "error: $FORMULA not found" >&2; exit 1; }
 
+# Homebrew is the authoritative parser of this file, and nothing ran it before the
+# formula went public. Every other check reads the formula as text - `sed -n`,
+# `grep -c`, awk - and the rest examine the downloaded archives, not the file. And
+# `update-formula.yml` commits and pushes the regenerated formula to main before it
+# dispatches the four-platform brew matrix, so a formula that does not parse is
+# what the tap serves for the length of that window, and every `brew install` or
+# `brew upgrade` inside it fails.
+#
+# Syntax only, which is exactly the defect class the updater can produce: it rewrites
+# `url` and `sha256` lines by substitution, so a bad rewrite drops a quote or a
+# delimiter rather than inventing a semantically wrong formula. Whether this is a
+# valid FORMULA - class name, required stanzas, style - stays `brew audit`'s job in
+# the matrix, which is the only thing that can answer it.
+#
+# Here rather than in update-formula.yml on purpose. A step that runs only at release
+# time is exercised by no CI run and fails first after the tag is pushed, which is the
+# trap it would exist to prevent; the `pins` job runs this script on every push, so
+# update-formula.sh, which runs this script on every formula it writes, before the
+# workflow commits it, inherits a check already proven by every run before it.
+#
+# A missing ruby is an error, not a skip: skipping would make the guard's absence
+# indistinguishable from its success. Homebrew is itself a Ruby program, so every
+# machine that can install this formula has one.
+command -v ruby >/dev/null 2>&1 || {
+  echo "error: ruby is not installed, so $FORMULA cannot be checked for parseability." >&2
+  echo "       This is deliberately not skipped: a formula that does not parse fails" >&2
+  echo "       every brew install of it, and a skipped check reads as a passing one." >&2
+  exit 1
+}
+if ! ruby_syntax="$(ruby -c "$FORMULA" 2>&1)"; then
+  echo "error: $FORMULA is not valid Ruby, so every brew install of it would fail:" >&2
+  # Ruby's own diagnostic, indented and bounded. The wording differs between
+  # interpreter versions - 2.6 prints one line, 4.0 prints a source excerpt with a
+  # caret per confused token, 50+ lines for a single dropped quote - so it is
+  # reported rather than matched on, and truncated so one missing character cannot
+  # bury the line above it in a CI log.
+  ruby_lines="$(printf '%s\n' "$ruby_syntax" | wc -l | tr -d ' ')"
+  printf '%s\n' "$ruby_syntax" | head -n 10 | sed 's/^/       /' >&2
+  if [ "$ruby_lines" -gt 10 ]; then
+    echo "       ... $((ruby_lines - 10)) more lines. Run: ruby -c $FORMULA" >&2
+  fi
+  exit 1
+fi
+
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | cut -d' ' -f1

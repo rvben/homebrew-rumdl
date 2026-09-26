@@ -2603,6 +2603,35 @@ case_run "unmodified formula clears every structural check" any \
 case_run "an argument is refused, not discarded" 2 \
   "takes no arguments" verify-formula.sh 0.2.77 < "$FORMULA"
 
+# The only check that reads the formula as Ruby rather than as text, and the only
+# place the authoritative parser runs before the formula is public. `update-formula.sh`
+# rewrites `url` and `sha256` lines by substitution, so its defect shape is a
+# dropped delimiter rather than a wrong value - this fixture takes the closing
+# quote off one macOS url, which is what a substitution losing its trailing
+# character produces.
+python3 - "$FORMULA" <<'PY' > "$WORK/badruby.rb"
+import re, sys
+t = open(sys.argv[1]).read()
+m = re.search(r'( *url "[^"\n]*aarch64-apple-darwin\.tar\.gz)"\n', t)
+assert m, "no aarch64-apple-darwin url line to unterminate"
+out = t[:m.end(1)] + "\n" + t[m.end():]
+assert len(out) == len(t) - 1, "expected exactly one byte removed"
+sys.stdout.write(out)
+PY
+assert_mutated "$WORK/badruby.rb"
+# The unpaired check refuses this fixture too, and also before any download: with
+# the closing quote gone the url line stops matching, so the sha256 below it has
+# nothing above it. Measured - deleting the ruby check's own `exit 1` leaves the
+# run printing this message and then "sha256 on line 24 has no url above it", so
+# without this forbid the case would pass against a guard that stops nothing. The
+# forbid omits the line number, which is a property of the fixture rather than of
+# the check.
+CASE_FORBID="has no url above it"
+CASE_ASSERT=assert_refused_before_download
+case_run "a formula that is not valid Ruby" 1 \
+  "is not valid Ruby" \
+  verify-formula.sh < "$WORK/badruby.rb"
+
 # The four correct assets arranged in the wrong Hardware::CPU branches. Every
 # other check in the script is satisfied by this formula, which hands Intel
 # Macs an arm64-only binary.
@@ -2732,8 +2761,41 @@ case_run "a version whose dots are mangled in the release path" 1 \
 # gets it. Removing the branch also leaves the branch counts wrong, so the
 # backstop further down refuses this formula too - its message must stay absent
 # for the refusal to be this check's.
-sed '/Hardware::CPU.intel?/d' "$FORMULA" > "$WORK/unbound.rb"
+#
+# The conditional is removed whole - both condition lines and the `end` that
+# closes them - leaving the urls directly inside `on_macos`/`on_linux`. Deleting
+# only the `if` lines was the earlier fixture, and it left a dangling `elsif`:
+# not valid Ruby, so once verify-formula.sh started parsing the formula this case
+# was refused by that check instead and never reached the one it names. A fixture
+# carrying two defects binds whichever is detected first, which is how it went
+# unnoticed that this one was never a formula Ruby would load.
+python3 - "$FORMULA" <<'PY' > "$WORK/unbound.rb"
+import re, sys
+out, dropped_if, dropped_end, inside = [], 0, 0, False
+for line in open(sys.argv[1]):
+    if re.match(r'^    (els)?if Hardware::CPU\.\w+\?$', line.rstrip('\n')):
+        inside = True
+        dropped_if += 1
+        continue
+    if inside and line.rstrip('\n') == '    end':
+        inside = False
+        dropped_end += 1
+        continue
+    out.append(line)
+assert dropped_if == 4, f"expected 4 condition lines, dropped {dropped_if}"
+assert dropped_end == 2, f"expected 2 closing ends, dropped {dropped_end}"
+assert not any('Hardware::CPU' in l for l in out), "a CPU predicate survived"
+sys.stdout.writelines(out)
+PY
 assert_mutated "$WORK/unbound.rb"
+# The fixture is a formula Ruby loads, so the parse check above cannot be what
+# refuses it. Asserted here rather than assumed, because that is the property the
+# previous fixture silently lost.
+ruby -c "$WORK/unbound.rb" >/dev/null 2>&1 || {
+  echo "the unbound-url fixture is not valid Ruby, so this case would be refused" >&2
+  echo "by the parse check rather than by the branch check it names" >&2
+  exit 1
+}
 CASE_ASSERT=assert_refused_before_download
 CASE_FORBID="does not declare each platform branch exactly once"
 case_run "a url outside any Hardware::CPU branch" 1 \
