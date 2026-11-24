@@ -72,16 +72,11 @@ jobs:
       - name: The scripts are free of shell defects
         env:
           # The version this job is expected to find, asserted rather than printed.
-          # Two notes tell contributors that CI's shellcheck is OLDER and stricter
-          # than a current local one, and both name this version: the one in
-          # scripts/validate-formula.sh and the one in CONTRIBUTING.md. A
-          # runner-image bump would make both false with nothing failing, and the
-          # first symptom would be a lint that passes locally and fails here.
-          # Bumping is a decision to take deliberately: re-read those notes, re-run
-          # the lint against the new version, then change all three together. The
-          # error below names every copy, because a message naming only one leaves
-          # the others to go stale unmentioned.
-          SHELLCHECK_EXPECTED: 0.9.0
+          # The contributor notes in scripts/validate-formula.sh and
+          # CONTRIBUTING.md both name this version so local lint can match CI.
+          # After a runner-image change, run the lint with the new version and
+          # update the expectation and both notes together.
+          SHELLCHECK_EXPECTED: 0.11.0
         run: |
           set -euo pipefail
           command -v shellcheck >/dev/null 2>&1 || {

@@ -177,11 +177,8 @@ to know:
   that it did not run when it is absent rather than reporting a clean lint. The
   gate for it is the `pins` job: GitHub's macOS images carry no `shellcheck`, so
   requiring it in this script broke both macOS `brew` jobs, and installing it
-  four times over to repeat a lint `pins` has already run buys nothing. A clean
-  run here is also not a promise of a clean one in CI: the runner ships 0.9.0, a
-  Homebrew machine currently has 0.11.0, and the older version is the stricter of
-  the two, having rejected an `A && B || C` line that the newer one accepted
-  silently. CI is the authority.
+  four times over to repeat a lint `pins` has already run buys nothing. Use
+  ShellCheck 0.11.0 locally to match the version asserted by the `pins` job.
 - `brew tap --force rvben/rumdl <path>` clones the repository, so the `brew`
   checks see `HEAD`, not your uncommitted changes. Commit first if you want
   brew to see your edit. The pin check at the start reads the working tree
