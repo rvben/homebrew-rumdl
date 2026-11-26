@@ -17,23 +17,23 @@ class Rumdl < Formula
   # Platform-specific downloads
   on_macos do
     if Hardware::CPU.intel?
-      url "https://github.com/rvben/rumdl/releases/download/v0.3.6/rumdl-v0.3.6-x86_64-apple-darwin.tar.gz"
-      sha256 "6f6f68999f8e2b77175728b22738888c9297db35430a21ed89d4a2d8ac2cc1a0"
+      url "https://github.com/rvben/rumdl/releases/download/v0.3.7/rumdl-v0.3.7-x86_64-apple-darwin.tar.gz"
+      sha256 "b7132dba4d73ff9b510dea7a9d37ded2e0048bd8f468336abf389d2f58024c10"
     elsif Hardware::CPU.arm?
-      url "https://github.com/rvben/rumdl/releases/download/v0.3.6/rumdl-v0.3.6-aarch64-apple-darwin.tar.gz"
-      sha256 "9689d82616a08593fc6203a3d73c8cc9d4663f5745e55b0d7410de824c451ebd"
+      url "https://github.com/rvben/rumdl/releases/download/v0.3.7/rumdl-v0.3.7-aarch64-apple-darwin.tar.gz"
+      sha256 "8f9178cd11f01f637fe65d973b2034608970708f8c35277f9201198a01438b28"
     end
   end
 
   on_linux do
     if Hardware::CPU.intel?
       # Use static musl binaries for better portability on Linux
-      url "https://github.com/rvben/rumdl/releases/download/v0.3.6/rumdl-v0.3.6-x86_64-unknown-linux-musl.tar.gz"
-      sha256 "a50fe06c5a878b81d617cbf1cb98c3c245ebf7fef1fb1463345d85922e7e1c32"
+      url "https://github.com/rvben/rumdl/releases/download/v0.3.7/rumdl-v0.3.7-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "77f22b8408db103e39a226bf803e34ffdfc975550f8f79276b3f39738ec2c3e5"
     elsif Hardware::CPU.arm?
       # Use static musl binaries for better portability on Linux
-      url "https://github.com/rvben/rumdl/releases/download/v0.3.6/rumdl-v0.3.6-aarch64-unknown-linux-musl.tar.gz"
-      sha256 "6c18087963f88f9d7d923d8e77d68b29fc9d12f384bf49790c0213b574b8e84a"
+      url "https://github.com/rvben/rumdl/releases/download/v0.3.7/rumdl-v0.3.7-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "236d0c162755b3c9597148b193243e74abe6c304cdeaf1045823220dc7234df0"
     end
   end
 
